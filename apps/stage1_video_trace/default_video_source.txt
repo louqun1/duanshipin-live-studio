@@ -1,0 +1,6 @@
+# Controllable file-backed source profile for the stage1 trace app.
+source_label=file-source-demo-0
+width=1280
+height=720
+fps=25
+frame_count=6

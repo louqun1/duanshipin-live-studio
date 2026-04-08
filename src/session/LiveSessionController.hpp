@@ -26,15 +26,21 @@ public:
             "TODO(user): in stage 1, orchestrate capture -> encode -> mux -> publish for video-only live");
     }
 
-    Status runStage1VideoTrace(const std::string& rtmpUrl, int frameCount, TraceLog* trace) {
+    Status runStage1VideoTrace(const std::string& rtmpUrl,
+                               const std::string& sourceConfigPath,
+                               int frameCountOverride,
+                               TraceLog* trace) {
         if (trace == nullptr) {
             return Status::InvalidArgument("trace is null");
         }
         if (rtmpUrl.empty()) {
             return Status::InvalidArgument("rtmpUrl is empty");
         }
-        if (frameCount <= 0) {
-            return Status::InvalidArgument("frameCount must be positive");
+        if (sourceConfigPath.empty()) {
+            return Status::InvalidArgument("sourceConfigPath is empty");
+        }
+        if (frameCountOverride < 0) {
+            return Status::InvalidArgument("frameCountOverride must be >= 0");
         }
 
         capture::VideoCaptureSource capture;
@@ -45,11 +51,21 @@ public:
 
         trace->push("session", "stage1 trace begins");
 
-        Status status = capture.configureSyntheticSource(1280, 720, 25, frameCount);
+        Status status = capture.configureFileSource(sourceConfigPath);
         if (!status.ok()) {
             return status;
         }
-        trace->push("capture", "synthetic source configured: 1280x720 @25fps");
+
+        const int frameCount = frameCountOverride > 0 ? frameCountOverride : capture.config().frameCount;
+        if (frameCount > capture.config().frameCount) {
+            return Status::InvalidArgument("frameCountOverride exceeds source file frame_count");
+        }
+
+        trace->push("capture",
+                    "file source configured: label=" + capture.config().sourceLabel + " path=" +
+                        capture.config().sourcePath + " " + std::to_string(capture.config().width) + "x" +
+                        std::to_string(capture.config().height) + " @" + std::to_string(capture.config().fps) +
+                        "fps frames=" + std::to_string(frameCount));
 
         status = capture.start();
         if (!status.ok()) {
@@ -67,7 +83,9 @@ public:
         if (!status.ok()) {
             return status;
         }
-        trace->push("encode", "trace encoder configured: H.264 1280x720 bitrate=2000000");
+        trace->push("encode",
+                    "trace encoder configured: H.264 " + std::to_string(capture.config().width) + "x" +
+                        std::to_string(capture.config().height) + " bitrate=2000000");
 
         status = publisher.connect(rtmpUrl);
         if (!status.ok()) {
@@ -108,12 +126,12 @@ public:
             }
 
             media::VideoFrame frame;
-            status = capture.captureSyntheticFrame(tick.frameIndex, tick.ptsMs, &frame);
+            status = capture.captureFrame(tick.frameIndex, tick.ptsMs, &frame);
             if (!status.ok()) {
                 return status;
             }
             trace->push("capture", "frame#" + std::to_string(frame.frameIndex) + " pts=" + std::to_string(frame.ptsMs) +
-                                      "ms source=" + frame.sourceLabel);
+                                      "ms source=" + frame.sourceLabel + " kind=" + frame.sourceKind);
 
             media::EncodedVideoAccessUnit accessUnit;
             status = encoder.encodeTraceFrame(frame, &accessUnit);

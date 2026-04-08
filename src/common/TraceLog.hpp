@@ -5,12 +5,16 @@
 #include <utility>
 #include <vector>
 
+#include "spdlog/spdlog.h"
+
 namespace live_studio {
 
 class TraceLog {
 public:
     void push(std::string stage, std::string detail) {
-        lines_.push_back("[" + std::move(stage) + "] " + std::move(detail));
+        std::string line = "[" + stage + "] " + detail;
+        lines_.push_back(line);
+        spdlog::info("{}", line);
     }
 
     [[nodiscard]] const std::vector<std::string>& lines() const noexcept {

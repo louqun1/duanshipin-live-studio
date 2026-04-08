@@ -15,7 +15,7 @@ public:
     }
 
     Status buildVideoSequenceHeader(const media::H264ParameterSets& parameterSets,
-                                    media::FlvVideoTagPlan* outTag) const {
+                                    media::FlvVideoTagPlan* outTag) const {//构建视频序列头信息
         if (outTag == nullptr) {
             return Status::InvalidArgument("outTag is null");
         }

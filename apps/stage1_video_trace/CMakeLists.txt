@@ -5,6 +5,7 @@ add_executable(stage1_video_trace
 target_include_directories(stage1_video_trace
     PRIVATE
         ${CMAKE_SOURCE_DIR}/src
+        ${LIVE_STUDIO_SPDLOG_INCLUDE_DIR}
 )
 
 set_target_properties(stage1_video_trace PROPERTIES
