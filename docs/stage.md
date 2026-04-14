@@ -16,14 +16,14 @@
 
 当前已经实现的完整链路是：
 
-`main -> initializeDefaultLogger -> LiveSessionController::runStage1VideoTrace -> VideoCaptureSource(file) -> AvTimeline -> VideoEncoder(FFmpeg H.264) -> FlvMuxer(trace) -> RtmpPublisher(trace)`
+`main -> initializeDefaultLogger -> LiveSessionController::runStage1VideoTrace -> VideoCaptureSource(file) -> AvTimeline -> VideoEncoder(FFmpeg H.264) -> FlvMuxer(real FLV video bytes) -> RtmpPublisher(trace)`
 
 这里的“推流全过程”目前指的是：
 
 - 已经生成真实的 YUV420P 原始帧
 - 已经用 FFmpeg 生成真实的 H.264 access unit
-- 已经把 H.264 结果映射成 `FlvVideoTagPlan`
-- 已经把 `FlvVideoTagPlan` 映射成 `RtmpMessagePlan`
+- 已经把 H.264 结果封装成带真实 `payloadBytes/tagBytes` 的 `FlvVideoTagPlan`
+- 已经把 `FlvVideoTagPlan.payloadBytes` 映射成 `RtmpMessagePlan.payloadBytes`
 - 已经调用 `RtmpPublisher::publishVideoTag()`
 
 这里还没有实现真实网络 RTMP 发送。当前 `publish` 的收口点是进程内的 trace 发布，而不是 socket 发包。
@@ -283,7 +283,7 @@
 - `dtsMs`
 - `annexBPayload`
 
-## 8. FLV 规划层
+## 8. FLV 封装层
 
 文件：
 
@@ -296,22 +296,35 @@
 
 当前实现行为：
 
-- 这里只生成 `media::FlvVideoTagPlan`
-- 还没有生成真实 FLV 字节流
+- 这里会生成带真实字节的 `media::FlvVideoTagPlan`
+- `payloadBytes` 是可直接映射到 RTMP message type 9 的 FLV VideoData
+- `tagBytes` 是 11 字节 FLV tag header 加 VideoData 的完整 tag 字节
+- `previousTagSize` 会保存当前 tag 对应的 `11 + dataSize`
 
 具体来说：
 
 ### 8.1 `buildVideoSequenceHeader()`
 
 - 消费 `H264ParameterSets`
-- 生成一条 `sequenceHeader = true` 的 `FlvVideoTagPlan`
+- 先生成 `AVCDecoderConfigurationRecord`
+- 再生成一条 `sequenceHeader = true` 的 `FlvVideoTagPlan`
+- 写出真实的：
+  - `payloadBytes`
+  - `tagBytes`
+  - `previousTagSize`
 - `payloadSummary` 类似：
   - `avc-sequence-header(sps(...),pps(...))`
 
 ### 8.2 `buildVideoNaluTag()`
 
 - 消费 `EncodedVideoAccessUnit`
+- 把 `annexBPayload` 拆成 NALU，再转成 4 字节长度前缀的 AVC payload
+- 根据 `dtsMs` 和 `ptsMs - dtsMs` 生成视频 tag 时间字段
 - 生成逐帧 `FlvVideoTagPlan`
+- 写出真实的：
+  - `payloadBytes`
+  - `tagBytes`
+  - `previousTagSize`
 - `payloadSummary` 类似：
   - `avc-keyframe-tag(...)`
   - `avc-interframe-tag(...)`
@@ -346,10 +359,12 @@
   - `chunkStreamId = 6`
   - `messageStreamId = 1`
   - `typeId = 9`
+- 把 `FlvVideoTagPlan.payloadBytes` 原样拷贝到 `RtmpMessagePlan.payloadBytes`
 
 ### 9.3 `publishVideoTag()`
 
 - 校验当前状态必须是 `publishing`
+- 校验 `message.payloadBytes` 非空
 - 只把 `lastPublishedSummary_` 更新成最近一次消息摘要
 
 这就是当前“推流”流程的最后一步。
@@ -426,7 +441,6 @@
 - `LiveSessionController::openSingleVideoStage()`
 - 真实摄像头采集
 - 真实文件解码读帧
-- 真实 FLV 字节封装
 - 真实 RTMP 握手
 - 真实 RTMP chunk 组包
 - 真实 RTMP socket 发送
@@ -434,7 +448,7 @@
 
 ## 13. 后续新增模块时怎么续写
 
-后续如果新增了真实 FLV 封装、真实 RTMP 发送、真实摄像头采集或音频链路，直接按下面规则往这份文档继续补：
+后续如果新增了真实 RTMP 发送、真实摄像头采集或音频链路，直接按下面规则往这份文档继续补：
 
 1. 先补“当前实现边界”
 2. 再补“入口到推流的完整调用链”

@@ -6,6 +6,7 @@ Current milestone status:
 - capture has moved from a hard-coded synthetic source to a controllable file-backed source
 - the file-backed source now generates synthetic YUV420P raw frames
 - `VideoEncoder` now runs a real FFmpeg H.264 encoder path
+- `FlvMuxer` now emits real FLV video payload/tag bytes
 - `RtmpPublisher` is still a trace placeholder
 - FFmpeg 6 is vendored under `third_party/ffmpeg6.0`
 - the old stage-0 `stage0_probe` entry has been removed
@@ -14,7 +15,7 @@ Current milestone status:
 
 The current executable entry is `stage1_video_trace`:
 
-`file-backed VideoCaptureSource(raw YUV420P) -> AvTimeline -> VideoEncoder(FFmpeg H.264) -> FlvMuxer(trace) -> RtmpPublisher(trace)`
+`file-backed VideoCaptureSource(raw YUV420P) -> AvTimeline -> VideoEncoder(FFmpeg H.264) -> FlvMuxer(real FLV video bytes) -> RtmpPublisher(trace)`
 
 The default source profile lives at:
 
@@ -77,5 +78,5 @@ If the second argument is a plain integer, the app treats it as a `frame_count` 
 The next stage-1 tasks remain:
 
 1. replace the synthetic file-backed raw frame generator with a real camera source or a true file payload reader
-2. replace the trace `FlvMuxer` plan output with real FLV byte layout
-3. replace the trace `RtmpPublisher` with real RTMP handshake and send logic
+2. replace the trace `RtmpPublisher` with real RTMP handshake, chunking, and socket send logic
+3. connect to SRS and verify the first viewer-side HTTP-FLV frame end to end

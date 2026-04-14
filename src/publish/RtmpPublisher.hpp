@@ -46,6 +46,9 @@ public:
         if (tag.timestampMs < 0) {
             return Status::InvalidArgument("tag timestamp must be >= 0");
         }
+        if (tag.payloadBytes.empty()) {
+            return Status::InvalidArgument("tag payload bytes are empty");
+        }
 
         outMessage->chunkStreamId = 6;
         outMessage->messageStreamId = 1;
@@ -54,12 +57,16 @@ public:
         outMessage->timestampMs = tag.timestampMs;
         outMessage->payloadSummary = (tag.sequenceHeader ? "rtmp-video-sequence-header(" : "rtmp-video-tag(") +
                                      tag.payloadSummary + ")";
+        outMessage->payloadBytes = tag.payloadBytes;
         return Status::Ok();
     }
 
     Status publishVideoTag(const media::RtmpMessagePlan& message) {
         if (state_ != RtmpConnectionState::publishing) {
             return Status::InvalidArgument("publisher is not in publishing state");
+        }
+        if (message.payloadBytes.empty()) {
+            return Status::InvalidArgument("message payload bytes are empty");
         }
         lastPublishedSummary_ = message.payloadSummary;
         return Status::Ok();

@@ -62,7 +62,11 @@ struct FlvVideoTagPlan {
     int frameIndex = -1;
     bool keyFrame = false;
     std::int64_t timestampMs = 0;
+    std::int32_t compositionTimeMs = 0; //合成时间偏移，dts + compositionTime = pts
     std::string payloadSummary;
+    std::vector<std::uint8_t> payloadBytes;//不包含前4字节的previousTagSize字段
+    std::vector<std::uint8_t> tagBytes;
+    std::uint32_t previousTagSize = 0;
 };
 
 struct RtmpMessagePlan {
@@ -72,6 +76,7 @@ struct RtmpMessagePlan {
     int frameIndex = -1;
     std::int64_t timestampMs = 0;
     std::string payloadSummary;
+    std::vector<std::uint8_t> payloadBytes;//不包含前12字节的RTMP消息头
 };
 
 }  // namespace live_studio::media

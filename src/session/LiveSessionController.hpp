@@ -107,7 +107,10 @@ public:
         if (!status.ok()) {
             return status;
         }
-        trace->push("mux", "built FLV sequence header: " + sequenceHeaderTag.payloadSummary);
+        trace->push("mux",
+                    "built FLV sequence header: " + sequenceHeaderTag.payloadSummary + " payload=" +
+                        std::to_string(sequenceHeaderTag.payloadBytes.size()) + "B tag=" +
+                        std::to_string(sequenceHeaderTag.tagBytes.size()) + "B");
 
         media::RtmpMessagePlan sequenceHeaderMessage;
         status = publisher.mapVideoTagToMessage(sequenceHeaderTag, &sequenceHeaderMessage);
@@ -118,7 +121,9 @@ public:
         if (!status.ok()) {
             return status;
         }
-        trace->push("publish", "planned RTMP sequence header message: " + sequenceHeaderMessage.payloadSummary);
+        trace->push("publish",
+                    "planned RTMP sequence header message: " + sequenceHeaderMessage.payloadSummary + " payload=" +
+                        std::to_string(sequenceHeaderMessage.payloadBytes.size()) + "B");
 
         for (int i = 0; i < frameCount; ++i) {
             timeline::VideoTick tick;
@@ -151,7 +156,9 @@ public:
                 return status;
             }
             trace->push("mux", "frame#" + std::to_string(tag.frameIndex) + " tag ts=" +
-                                  std::to_string(tag.timestampMs) + "ms " + tag.payloadSummary);
+                                  std::to_string(tag.timestampMs) + "ms " + tag.payloadSummary + " payload=" +
+                                  std::to_string(tag.payloadBytes.size()) + "B tag=" +
+                                  std::to_string(tag.tagBytes.size()) + "B");
 
             media::RtmpMessagePlan message;
             status = publisher.mapVideoTagToMessage(tag, &message);
@@ -163,7 +170,8 @@ public:
                 return status;
             }
             trace->push("publish", "frame#" + std::to_string(message.frameIndex) + " message ts=" +
-                                      std::to_string(message.timestampMs) + "ms " + message.payloadSummary);
+                                      std::to_string(message.timestampMs) + "ms " + message.payloadSummary +
+                                      " payload=" + std::to_string(message.payloadBytes.size()) + "B");
         }
 
         capture.stop();
