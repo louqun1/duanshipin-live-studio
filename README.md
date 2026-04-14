@@ -4,15 +4,17 @@
 
 Current milestone status:
 - capture has moved from a hard-coded synthetic source to a controllable file-backed source
-- `VideoEncoder` is still a trace placeholder
+- the file-backed source now generates synthetic YUV420P raw frames
+- `VideoEncoder` now runs a real FFmpeg H.264 encoder path
 - `RtmpPublisher` is still a trace placeholder
+- FFmpeg 6 is vendored under `third_party/ffmpeg6.0`
 - the old stage-0 `stage0_probe` entry has been removed
 
 ## Current runnable entry
 
 The current executable entry is `stage1_video_trace`:
 
-`file-backed VideoCaptureSource -> AvTimeline -> VideoEncoder(trace) -> FlvMuxer(trace) -> RtmpPublisher(trace)`
+`file-backed VideoCaptureSource(raw YUV420P) -> AvTimeline -> VideoEncoder(FFmpeg H.264) -> FlvMuxer(trace) -> RtmpPublisher(trace)`
 
 The default source profile lives at:
 
@@ -38,6 +40,10 @@ cmake --build build --target stage1_video_trace
 .\build\apps\stage1_video_trace\stage1_video_trace.exe
 ```
 
+The project now expects FFmpeg to live in:
+
+`third_party/ffmpeg6.0`
+
 With the helper script:
 
 ```powershell
@@ -58,19 +64,18 @@ If the second argument is a plain integer, the app treats it as a `frame_count` 
 
 - `src/capture/VideoCaptureSource.hpp`
   - controllable file-backed source today, real camera backend later
+  - currently synthesizes YUV420P payloads from the source profile
 - `src/encode/VideoEncoder.hpp`
-  - trace H.264 placeholder output
+  - real FFmpeg-backed H.264 encoder output
 - `src/publish/RtmpPublisher.hpp`
   - trace RTMP planning only, no real socket send yet
-- `docs/stage_00_report.md`
-  - kept as a historical report
-- `docs/stage_01_report.md`
-  - stage-1 incremental report
+- `docs/stage.md`
+  - single evolving stage document from `main()` to the current publish boundary
 
 ## Next step
 
 The next stage-1 tasks remain:
 
-1. replace the file-backed source with a real camera source, or make the file-backed source carry real raw frame payloads
-2. replace the trace `VideoEncoder` with a real H.264 encoder path
+1. replace the synthetic file-backed raw frame generator with a real camera source or a true file payload reader
+2. replace the trace `FlvMuxer` plan output with real FLV byte layout
 3. replace the trace `RtmpPublisher` with real RTMP handshake and send logic

@@ -228,7 +228,7 @@ HTTP-FLV -> Demux -> Decode -> Render / Audio Play
 ### 7.1 阶段报告文件
 建议命名：
 
-- `docs/stage_01_report.md`
+- `docs/stage.md`
 - `docs/stage_02_report.md`
 - ...
 
@@ -815,4 +815,3 @@ HTTP-FLV -> Demux -> Decode -> Render / Audio Play
 ## 12. 最终一句话原则
 
 > 这个项目必须按“先看懂单人直播主链路，再补业务状态，再做 1v1 WebRTC，再做节目流合成，最后扩展到小规模多人连麦和 GStreamer 对照实现”的顺序推进；每个阶段都必须可运行、可验证、可解释、可检查，未经确认不得跳阶段。
-

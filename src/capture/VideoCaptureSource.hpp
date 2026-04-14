@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cctype>
+#include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <string>
@@ -54,6 +55,9 @@ public:
             return Status::NotImplemented(
                 "TODO(user): configure a file-backed or real camera source before start");
         }
+        if ((config_.width % 2) != 0 || (config_.height % 2) != 0) {
+            return Status::InvalidArgument("file-backed YUV420P source requires even width and height");
+        }
         started_ = true;
         return Status::Ok();
     }
@@ -83,7 +87,11 @@ public:
         outFrame->height = config_.height;
         outFrame->fps = config_.fps;
         outFrame->ptsMs = ptsMs;
-        outFrame->hasPixelPayload = false;
+        outFrame->pixelFormat = media::VideoPixelFormat::yuv420p;
+        outFrame->lineStrideY = config_.width;
+        outFrame->lineStrideU = config_.width / 2;
+        outFrame->lineStrideV = config_.width / 2;
+        fillSyntheticYuv420pPayload(frameIndex, outFrame);
         return Status::Ok();
     }
 
@@ -96,6 +104,41 @@ public:
     }
 
 private:
+    static void fillSyntheticYuv420pPayload(int frameIndex, media::VideoFrame* outFrame) {
+        const int width = outFrame->width;
+        const int height = outFrame->height;
+        const int chromaWidth = width / 2;
+        const int chromaHeight = height / 2;
+
+        const std::size_t yPlaneSize = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+        const std::size_t chromaPlaneSize =
+            static_cast<std::size_t>(chromaWidth) * static_cast<std::size_t>(chromaHeight);
+
+        outFrame->pixelPayload.resize(yPlaneSize + (chromaPlaneSize * 2));
+        std::uint8_t* yPlane = outFrame->pixelPayload.data();
+        std::uint8_t* uPlane = yPlane + yPlaneSize;
+        std::uint8_t* vPlane = uPlane + chromaPlaneSize;
+
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const int luminance = (x + (y / 2) + (frameIndex * 7)) % 256;
+                yPlane[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)] =
+                    static_cast<std::uint8_t>(luminance);
+            }
+        }
+
+        for (int y = 0; y < chromaHeight; ++y) {
+            for (int x = 0; x < chromaWidth; ++x) {
+                const std::size_t offset =
+                    static_cast<std::size_t>(y) * static_cast<std::size_t>(chromaWidth) + static_cast<std::size_t>(x);
+                uPlane[offset] = static_cast<std::uint8_t>((96 + x + (frameIndex * 5)) % 256);
+                vPlane[offset] = static_cast<std::uint8_t>((160 + (y * 2) + (frameIndex * 3)) % 256);
+            }
+        }
+
+        outFrame->hasPixelPayload = true;
+    }
+
     static std::string trim(const std::string& text) {
         std::size_t first = 0;
         while (first < text.size() && std::isspace(static_cast<unsigned char>(text[first])) != 0) {

@@ -84,7 +84,7 @@ public:
             return status;
         }
         trace->push("encode",
-                    "trace encoder configured: H.264 " + std::to_string(capture.config().width) + "x" +
+                    "FFmpeg encoder configured: H.264 " + std::to_string(capture.config().width) + "x" +
                         std::to_string(capture.config().height) + " bitrate=2000000");
 
         status = publisher.connect(rtmpUrl);
@@ -98,7 +98,9 @@ public:
         if (!status.ok()) {
             return status;
         }
-        trace->push("encode", "sequence header ready: " + parameterSets.spsLabel + " / " + parameterSets.ppsLabel);
+        trace->push("encode",
+                    "sequence header ready: profile=" + parameterSets.profile + " " + parameterSets.spsLabel + " / " +
+                        parameterSets.ppsLabel);
 
         media::FlvVideoTagPlan sequenceHeaderTag;
         status = muxer.buildVideoSequenceHeader(parameterSets, &sequenceHeaderTag);
@@ -131,10 +133,11 @@ public:
                 return status;
             }
             trace->push("capture", "frame#" + std::to_string(frame.frameIndex) + " pts=" + std::to_string(frame.ptsMs) +
-                                      "ms source=" + frame.sourceLabel + " kind=" + frame.sourceKind);
+                                      "ms source=" + frame.sourceLabel + " kind=" + frame.sourceKind + " payload=" +
+                                      std::to_string(frame.pixelPayload.size()) + "B");
 
             media::EncodedVideoAccessUnit accessUnit;
-            status = encoder.encodeTraceFrame(frame, &accessUnit);
+            status = encoder.encodeFrame(frame, &accessUnit);
             if (!status.ok()) {
                 return status;
             }

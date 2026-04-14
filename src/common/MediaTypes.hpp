@@ -2,8 +2,14 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace live_studio::media {
+
+enum class VideoPixelFormat {
+    unknown,
+    yuv420p,
+};
 
 struct VideoCaptureConfig {
     std::string sourceKind = "unconfigured";
@@ -25,12 +31,20 @@ struct VideoFrame {
     int fps = 0;
     std::int64_t ptsMs = 0;
     bool hasPixelPayload = false;
+    VideoPixelFormat pixelFormat = VideoPixelFormat::unknown;
+    int lineStrideY = 0;
+    int lineStrideU = 0;
+    int lineStrideV = 0;
+    std::vector<std::uint8_t> pixelPayload;
 };
 
-struct H264ParameterSets {//H.264编码参数集
+struct H264ParameterSets {
     std::string profile = "baseline";
     std::string spsLabel;
     std::string ppsLabel;
+    std::vector<std::uint8_t> spsBytes;
+    std::vector<std::uint8_t> ppsBytes;
+    std::vector<std::uint8_t> extradataBytes;
 };
 
 struct EncodedVideoAccessUnit {
@@ -38,10 +52,12 @@ struct EncodedVideoAccessUnit {
     bool keyFrame = false;
     std::int64_t ptsMs = 0;
     std::int64_t dtsMs = 0;
+    std::string codec = "h264";
     std::string nalSummary;
+    std::vector<std::uint8_t> annexBPayload;
 };
 
-struct FlvVideoTagPlan {//FLV视频标签信息
+struct FlvVideoTagPlan {
     bool sequenceHeader = false;
     int frameIndex = -1;
     bool keyFrame = false;
