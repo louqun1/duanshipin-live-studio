@@ -590,7 +590,7 @@ Status performHandshake(SocketHandle socketHandle) {
     return Status::Ok();
 }
 
-std::vector<std::uint8_t> buildConnectCommandPayload(const RtmpUrlParts& urlParts) {
+std::vector<std::uint8_t> buildConnectCommandPayload(const RtmpUrlParts& urlParts, bool advertiseAacAudio) {
     std::vector<std::uint8_t> payload;
     appendAmf0String("connect", &payload);
     appendAmf0Number(1.0, &payload);
@@ -609,7 +609,7 @@ std::vector<std::uint8_t> buildConnectCommandPayload(const RtmpUrlParts& urlPart
     appendAmf0ObjectPropertyName("capabilities", &payload);
     appendAmf0Number(15.0, &payload);
     appendAmf0ObjectPropertyName("audioCodecs", &payload);
-    appendAmf0Number(0.0, &payload);
+    appendAmf0Number(advertiseAacAudio ? 1024.0 : 0.0, &payload);
     appendAmf0ObjectPropertyName("videoCodecs", &payload);
     appendAmf0Number(252.0, &payload);
     appendAmf0ObjectPropertyName("videoFunction", &payload);
@@ -645,22 +645,41 @@ std::vector<std::uint8_t> buildSetChunkSizePayload(std::uint32_t chunkSize) {
     return payload;
 }
 
-std::vector<std::uint8_t> buildOnMetaDataPayload(int width, int height, int fps) {
+std::vector<std::uint8_t> buildOnMetaDataPayload(int width,
+                                                 int height,
+                                                 int fps,
+                                                 int audioSampleRate,
+                                                 int audioChannels) {
     std::vector<std::uint8_t> payload;
     appendAmf0String("@setDataFrame", &payload);
     appendAmf0String("onMetaData", &payload);
 
-    appendAmf0EcmaArrayStart(6, &payload);
+    const bool hasVideo = width > 0 && height > 0 && fps > 0;
+    const bool hasAudio = audioSampleRate > 0 && audioChannels > 0;
+    const std::uint32_t propertyCount = 2u + (hasVideo ? 4u : 0u) + (hasAudio ? 4u : 0u);
+    appendAmf0EcmaArrayStart(propertyCount, &payload);
     appendAmf0ObjectPropertyName("duration", &payload);
     appendAmf0Number(0.0, &payload);
-    appendAmf0ObjectPropertyName("width", &payload);
-    appendAmf0Number(static_cast<double>(width), &payload);
-    appendAmf0ObjectPropertyName("height", &payload);
-    appendAmf0Number(static_cast<double>(height), &payload);
-    appendAmf0ObjectPropertyName("framerate", &payload);
-    appendAmf0Number(static_cast<double>(fps), &payload);
-    appendAmf0ObjectPropertyName("videocodecid", &payload);
-    appendAmf0Number(7.0, &payload);
+    if (hasVideo) {
+        appendAmf0ObjectPropertyName("width", &payload);
+        appendAmf0Number(static_cast<double>(width), &payload);
+        appendAmf0ObjectPropertyName("height", &payload);
+        appendAmf0Number(static_cast<double>(height), &payload);
+        appendAmf0ObjectPropertyName("framerate", &payload);
+        appendAmf0Number(static_cast<double>(fps), &payload);
+        appendAmf0ObjectPropertyName("videocodecid", &payload);
+        appendAmf0Number(7.0, &payload);
+    }
+    if (hasAudio) {
+        appendAmf0ObjectPropertyName("audiocodecid", &payload);
+        appendAmf0Number(10.0, &payload);
+        appendAmf0ObjectPropertyName("audiosamplerate", &payload);
+        appendAmf0Number(static_cast<double>(audioSampleRate), &payload);
+        appendAmf0ObjectPropertyName("audiochannels", &payload);
+        appendAmf0Number(static_cast<double>(audioChannels), &payload);
+        appendAmf0ObjectPropertyName("stereo", &payload);
+        appendAmf0Boolean(audioChannels > 1, &payload);
+    }
     appendAmf0ObjectPropertyName("encoder", &payload);
     appendAmf0String("duanshipin-live-studio/stage1_video_trace", &payload);
     appendAmf0ObjectEnd(&payload);
@@ -1272,11 +1291,13 @@ Status sendSetChunkSize(PublisherContext* context, std::uint32_t chunkSize) {
     return Status::Ok();
 }
 
-Status sendOnMetaData(PublisherContext* context, int width, int height, int fps) {
-    if (width <= 0 || height <= 0 || fps <= 0) {
-        return Status::InvalidArgument("metadata dimensions and fps must be positive");
+Status sendOnMetaData(PublisherContext* context, int width, int height, int fps, int audioSampleRate, int audioChannels) {
+    const bool hasVideo = width > 0 && height > 0 && fps > 0;
+    const bool hasAudio = audioSampleRate > 0 && audioChannels > 0;
+    if (!hasVideo && !hasAudio) {
+        return Status::InvalidArgument("metadata requires at least one configured audio/video stream");
     }
-    const std::vector<std::uint8_t> payload = buildOnMetaDataPayload(width, height, fps);
+    const std::vector<std::uint8_t> payload = buildOnMetaDataPayload(width, height, fps, audioSampleRate, audioChannels);
     Status status = sendRtmpMessage(context, 5, 0, 18, context->streamId, payload);
     if (!status.ok()) {
         return status;
@@ -1299,6 +1320,16 @@ Status RtmpPublisher::configureVideoStream(int width, int height, int fps) {
     videoWidth_ = width;
     videoHeight_ = height;
     videoFps_ = fps;
+    return Status::Ok();
+}
+
+Status RtmpPublisher::configureAudioStream(int sampleRate, int channels) {
+    if (sampleRate <= 0 || channels <= 0) {
+        return Status::InvalidArgument("audio stream sampleRate/channels must be positive");
+    }
+
+    audioSampleRate_ = sampleRate;
+    audioChannels_ = channels;
     return Status::Ok();
 }
 
@@ -1340,7 +1371,8 @@ Status RtmpPublisher::connect(const std::string& url) {
         return status;
     }
 
-    status = sendRtmpMessage(nextContext.get(), 3, 0, 20, 0, buildConnectCommandPayload(urlParts));
+    status =
+        sendRtmpMessage(nextContext.get(), 3, 0, 20, 0, buildConnectCommandPayload(urlParts, audioSampleRate_ > 0));
     if (!status.ok()) {
         state_ = RtmpConnectionState::failed;
         return status;
@@ -1382,8 +1414,8 @@ Status RtmpPublisher::connect(const std::string& url) {
         return status;
     }
 
-    if (videoWidth_ > 0 && videoHeight_ > 0 && videoFps_ > 0) {
-        status = sendOnMetaData(nextContext.get(), videoWidth_, videoHeight_, videoFps_);
+    if ((videoWidth_ > 0 && videoHeight_ > 0 && videoFps_ > 0) || (audioSampleRate_ > 0 && audioChannels_ > 0)) {
+        status = sendOnMetaData(nextContext.get(), videoWidth_, videoHeight_, videoFps_, audioSampleRate_, audioChannels_);
         if (!status.ok()) {
             state_ = RtmpConnectionState::failed;
             return status;
@@ -1419,7 +1451,30 @@ Status RtmpPublisher::mapVideoTagToMessage(const media::FlvVideoTagPlan& tag, me
     return Status::Ok();
 }
 
-Status RtmpPublisher::publishVideoTag(const media::RtmpMessagePlan& message) {
+Status RtmpPublisher::mapAudioTagToMessage(const media::FlvAudioTagPlan& tag, media::RtmpMessagePlan* outMessage) const {
+    if (outMessage == nullptr) {
+        return Status::InvalidArgument("outMessage is null");
+    }
+    if (tag.timestampMs < 0) {
+        return Status::InvalidArgument("tag timestamp must be >= 0");
+    }
+    if (tag.payloadBytes.empty()) {
+        return Status::InvalidArgument("tag payload bytes are empty");
+    }
+
+    outMessage->chunkStreamId = 4;
+    outMessage->messageStreamId =
+        context_ != nullptr && context_->streamId > 0 ? static_cast<int>(context_->streamId) : 1;
+    outMessage->typeId = 8;
+    outMessage->frameIndex = tag.frameIndex;
+    outMessage->timestampMs = tag.timestampMs;
+    outMessage->payloadSummary = (tag.sequenceHeader ? "rtmp-audio-sequence-header(" : "rtmp-audio-tag(") +
+                                 tag.payloadSummary + ")";
+    outMessage->payloadBytes = tag.payloadBytes;
+    return Status::Ok();
+}
+
+Status RtmpPublisher::publishMediaMessage(const media::RtmpMessagePlan& message) {
     if (state_ != RtmpConnectionState::publishing) {
         return Status::InvalidArgument("publisher is not in publishing state");
     }
@@ -1448,6 +1503,14 @@ Status RtmpPublisher::publishVideoTag(const media::RtmpMessagePlan& message) {
 
     lastPublishedSummary_ = message.payloadSummary;
     return Status::Ok();
+}
+
+Status RtmpPublisher::publishVideoTag(const media::RtmpMessagePlan& message) {
+    return publishMediaMessage(message);
+}
+
+Status RtmpPublisher::publishAudioTag(const media::RtmpMessagePlan& message) {
+    return publishMediaMessage(message);
 }
 
 void RtmpPublisher::disconnect() noexcept {

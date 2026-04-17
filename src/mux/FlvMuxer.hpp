@@ -153,6 +153,7 @@ inline Status buildAvcVideoPayload(const std::vector<std::uint8_t>& avcPayload,
 }
 
 inline Status buildFlvTagBytes(std::int64_t timestampMs,
+                               std::uint8_t tagType,
                                const std::vector<std::uint8_t>& payloadBytes,
                                std::vector<std::uint8_t>* outTagBytes,
                                std::uint32_t* outPreviousTagSize) {
@@ -174,7 +175,7 @@ inline Status buildFlvTagBytes(std::int64_t timestampMs,
 
     std::vector<std::uint8_t> tagBytes;
     tagBytes.reserve(11 + payloadBytes.size());
-    tagBytes.push_back(9);
+    tagBytes.push_back(tagType);
     appendUint24Be(static_cast<std::uint32_t>(payloadBytes.size()), &tagBytes);
 
     const std::uint32_t timestampField = static_cast<std::uint32_t>(timestampMs);
@@ -185,6 +186,34 @@ inline Status buildFlvTagBytes(std::int64_t timestampMs,
 
     *outPreviousTagSize = static_cast<std::uint32_t>(tagBytes.size());
     *outTagBytes = std::move(tagBytes);
+    return Status::Ok();
+}
+
+inline Status buildAacAudioPayload(const std::vector<std::uint8_t>& audioPayload,
+                                   bool sequenceHeader,
+                                   int channels,
+                                   std::vector<std::uint8_t>* outBytes) {
+    if (outBytes == nullptr) {
+        return Status::InvalidArgument("outBytes is null");
+    }
+    if (audioPayload.empty()) {
+        return Status::InvalidArgument("AAC audio payload is empty");
+    }
+    if (channels <= 0) {
+        return Status::InvalidArgument("AAC audio payload requires positive channels");
+    }
+
+    std::vector<std::uint8_t> payload;
+    payload.reserve(2 + audioPayload.size());
+    const std::uint8_t soundFormat = 10;
+    const std::uint8_t soundRate = 3;
+    const std::uint8_t soundSize = 1;
+    const std::uint8_t soundType = channels > 1 ? 1 : 0;
+    payload.push_back(static_cast<std::uint8_t>((soundFormat << 4) | (soundRate << 2) | (soundSize << 1) | soundType));
+    payload.push_back(static_cast<std::uint8_t>(sequenceHeader ? 0 : 1));
+    payload.insert(payload.end(), audioPayload.begin(), audioPayload.end());
+
+    *outBytes = std::move(payload);
     return Status::Ok();
 }
 
@@ -219,7 +248,7 @@ public:
 
         std::vector<std::uint8_t> tagBytes;
         std::uint32_t previousTagSize = 0;
-        status = detail::buildFlvTagBytes(0, payloadBytes, &tagBytes, &previousTagSize);
+        status = detail::buildFlvTagBytes(0, 9, payloadBytes, &tagBytes, &previousTagSize);
         if (!status.ok()) {
             return status;
         }
@@ -279,7 +308,7 @@ public:
 
         std::vector<std::uint8_t> tagBytes;
         std::uint32_t previousTagSize = 0;
-        status = detail::buildFlvTagBytes(accessUnit.dtsMs, payloadBytes, &tagBytes, &previousTagSize);
+        status = detail::buildFlvTagBytes(accessUnit.dtsMs, 9, payloadBytes, &tagBytes, &previousTagSize);
         if (!status.ok()) {
             return status;
         }
@@ -291,6 +320,81 @@ public:
         outTag->compositionTimeMs = compositionTimeMs;
         outTag->payloadSummary = (accessUnit.keyFrame ? "avc-keyframe-tag(" : "avc-interframe-tag(") +
                                  accessUnit.nalSummary + ")";
+        outTag->payloadBytes = std::move(payloadBytes);
+        outTag->tagBytes = std::move(tagBytes);
+        outTag->previousTagSize = previousTagSize;
+        return Status::Ok();
+    }
+
+    Status buildAudioSequenceHeader(const media::AacDecoderConfig& decoderConfig,
+                                    media::FlvAudioTagPlan* outTag) const {
+        if (outTag == nullptr) {
+            return Status::InvalidArgument("outTag is null");
+        }
+        if (decoderConfig.audioSpecificConfigBytes.empty()) {
+            return Status::InvalidArgument("AAC decoder config is empty");
+        }
+        if (decoderConfig.channels <= 0) {
+            return Status::InvalidArgument("AAC decoder config channels must be positive");
+        }
+
+        std::vector<std::uint8_t> payloadBytes;
+        Status status = detail::buildAacAudioPayload(
+            decoderConfig.audioSpecificConfigBytes, true, decoderConfig.channels, &payloadBytes);
+        if (!status.ok()) {
+            return status;
+        }
+
+        std::vector<std::uint8_t> tagBytes;
+        std::uint32_t previousTagSize = 0;
+        status = detail::buildFlvTagBytes(0, 8, payloadBytes, &tagBytes, &previousTagSize);
+        if (!status.ok()) {
+            return status;
+        }
+
+        outTag->sequenceHeader = true;
+        outTag->frameIndex = -1;
+        outTag->timestampMs = 0;
+        outTag->payloadSummary = "aac-sequence-header(" + decoderConfig.configLabel + ")";
+        outTag->payloadBytes = std::move(payloadBytes);
+        outTag->tagBytes = std::move(tagBytes);
+        outTag->previousTagSize = previousTagSize;
+        return Status::Ok();
+    }
+
+    Status buildAudioRawTag(const media::EncodedAudioAccessUnit& accessUnit,
+                            int channels,
+                            media::FlvAudioTagPlan* outTag) const {
+        if (outTag == nullptr) {
+            return Status::InvalidArgument("outTag is null");
+        }
+        if (channels <= 0) {
+            return Status::InvalidArgument("AAC channels must be positive");
+        }
+        if (accessUnit.ptsMs < 0 || accessUnit.dtsMs < 0) {
+            return Status::InvalidArgument("AAC access unit timestamps must be >= 0");
+        }
+        if (accessUnit.rawPayload.empty()) {
+            return Status::InvalidArgument("AAC access unit payload is empty");
+        }
+
+        std::vector<std::uint8_t> payloadBytes;
+        Status status = detail::buildAacAudioPayload(accessUnit.rawPayload, false, channels, &payloadBytes);
+        if (!status.ok()) {
+            return status;
+        }
+
+        std::vector<std::uint8_t> tagBytes;
+        std::uint32_t previousTagSize = 0;
+        status = detail::buildFlvTagBytes(accessUnit.dtsMs, 8, payloadBytes, &tagBytes, &previousTagSize);
+        if (!status.ok()) {
+            return status;
+        }
+
+        outTag->sequenceHeader = false;
+        outTag->frameIndex = accessUnit.frameIndex;
+        outTag->timestampMs = accessUnit.dtsMs;
+        outTag->payloadSummary = "aac-raw-tag(" + accessUnit.payloadSummary + ")";
         outTag->payloadBytes = std::move(payloadBytes);
         outTag->tagBytes = std::move(tagBytes);
         outTag->previousTagSize = previousTagSize;

@@ -11,6 +11,11 @@ enum class VideoPixelFormat {
     yuv420p,
 };
 
+enum class AudioSampleFormat {
+    unknown,
+    s16_interleaved,
+};
+
 struct VideoCaptureConfig {
     std::string sourceKind = "unconfigured";
     std::string sourceLabel = "unconfigured-source";
@@ -19,6 +24,21 @@ struct VideoCaptureConfig {
     int width = 0;
     int height = 0;
     int fps = 0;
+    int frameCount = 0;
+};
+
+struct LiveDeviceCaptureConfig {
+    std::string sourceKind = "live-device";
+    std::string sourceLabel = "live-device-source";
+    std::string videoDeviceId;
+    std::string audioDeviceId;
+    std::string resolvedVideoDeviceName;
+    std::string resolvedAudioDeviceName;
+    int width = 0;
+    int height = 0;
+    int fps = 0;
+    int sampleRate = 0;
+    int channels = 0;
     int frameCount = 0;
 };
 
@@ -36,6 +56,19 @@ struct VideoFrame {
     int lineStrideU = 0;
     int lineStrideV = 0;
     std::vector<std::uint8_t> pixelPayload;
+};
+
+struct AudioFrame {
+    std::string sourceKind = "unconfigured";
+    std::string sourceLabel = "unconfigured-source";
+    int frameIndex = 0;
+    int sampleRate = 0;
+    int channels = 0;
+    int samplesPerChannel = 0;
+    std::int64_t ptsMs = 0;
+    bool hasSamplePayload = false;
+    AudioSampleFormat sampleFormat = AudioSampleFormat::unknown;
+    std::vector<std::uint8_t> samplePayload;
 };
 
 struct H264ParameterSets {
@@ -57,6 +90,23 @@ struct EncodedVideoAccessUnit {
     std::vector<std::uint8_t> annexBPayload;
 };
 
+struct AacDecoderConfig {
+    int sampleRate = 0;
+    int channels = 0;
+    std::string profile = "aac-lc";
+    std::string configLabel;
+    std::vector<std::uint8_t> audioSpecificConfigBytes;
+};
+
+struct EncodedAudioAccessUnit {
+    int frameIndex = 0;
+    std::int64_t ptsMs = 0;
+    std::int64_t dtsMs = 0;
+    std::string codec = "aac";
+    std::string payloadSummary;
+    std::vector<std::uint8_t> rawPayload;
+};
+
 struct FlvVideoTagPlan {
     bool sequenceHeader = false;
     int frameIndex = -1;
@@ -65,6 +115,16 @@ struct FlvVideoTagPlan {
     std::int32_t compositionTimeMs = 0; //合成时间偏移，dts + compositionTime = pts
     std::string payloadSummary;
     std::vector<std::uint8_t> payloadBytes;//不包含前4字节的previousTagSize字段
+    std::vector<std::uint8_t> tagBytes;
+    std::uint32_t previousTagSize = 0;
+};
+
+struct FlvAudioTagPlan {
+    bool sequenceHeader = false;
+    int frameIndex = -1;
+    std::int64_t timestampMs = 0;
+    std::string payloadSummary;
+    std::vector<std::uint8_t> payloadBytes;
     std::vector<std::uint8_t> tagBytes;
     std::uint32_t previousTagSize = 0;
 };

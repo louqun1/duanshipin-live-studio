@@ -1,0 +1,12 @@
+# Default Media Foundation + WASAPI live-device profile for stage1_video_trace.
+# `default` picks the first available camera and the default capture endpoint.
+
+source_label=live-device-demo-0
+video_device=default
+audio_device=default
+width=640
+height=480
+fps=30
+sample_rate=48000
+channels=2
+frame_count=300

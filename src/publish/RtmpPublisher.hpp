@@ -36,9 +36,12 @@ public:
     }
 
     Status configureVideoStream(int width, int height, int fps);
+    Status configureAudioStream(int sampleRate, int channels);
     Status connect(const std::string& url);
     Status mapVideoTagToMessage(const media::FlvVideoTagPlan& tag, media::RtmpMessagePlan* outMessage) const;
+    Status mapAudioTagToMessage(const media::FlvAudioTagPlan& tag, media::RtmpMessagePlan* outMessage) const;
     Status publishVideoTag(const media::RtmpMessagePlan& message);
+    Status publishAudioTag(const media::RtmpMessagePlan& message);
     void disconnect() noexcept;
 
     [[nodiscard]] const std::string& url() const noexcept {
@@ -57,6 +60,10 @@ private:
     int videoWidth_ = 0;
     int videoHeight_ = 0;
     int videoFps_ = 0;
+    int audioSampleRate_ = 0;
+    int audioChannels_ = 0;
+
+    Status publishMediaMessage(const media::RtmpMessagePlan& message);
 };
 
 }  // namespace live_studio::publish

@@ -31,9 +31,29 @@ live_studio_import_shared_library(
     "${LIVE_STUDIO_FFMPEG_ROOT}/bin/avcodec-60.dll"
 )
 live_studio_import_shared_library(
+    FFmpeg::avdevice
+    "${LIVE_STUDIO_FFMPEG_ROOT}/lib/avdevice.lib"
+    "${LIVE_STUDIO_FFMPEG_ROOT}/bin/avdevice-60.dll"
+)
+live_studio_import_shared_library(
+    FFmpeg::avformat
+    "${LIVE_STUDIO_FFMPEG_ROOT}/lib/avformat.lib"
+    "${LIVE_STUDIO_FFMPEG_ROOT}/bin/avformat-60.dll"
+)
+live_studio_import_shared_library(
     FFmpeg::avutil
     "${LIVE_STUDIO_FFMPEG_ROOT}/lib/avutil.lib"
     "${LIVE_STUDIO_FFMPEG_ROOT}/bin/avutil-58.dll"
+)
+live_studio_import_shared_library(
+    FFmpeg::swresample
+    "${LIVE_STUDIO_FFMPEG_ROOT}/lib/swresample.lib"
+    "${LIVE_STUDIO_FFMPEG_ROOT}/bin/swresample-4.dll"
+)
+live_studio_import_shared_library(
+    FFmpeg::swscale
+    "${LIVE_STUDIO_FFMPEG_ROOT}/lib/swscale.lib"
+    "${LIVE_STUDIO_FFMPEG_ROOT}/bin/swscale-7.dll"
 )
 
 message(STATUS "duanshipin-live-studio FFmpeg root: ${LIVE_STUDIO_FFMPEG_ROOT}")

@@ -2,38 +2,50 @@
 
 `duanshipin-live-studio` is the broadcaster-side project that runs alongside `duanshipin-pingtai`.
 
-Current milestone status:
-- capture has moved from a hard-coded synthetic source to a controllable file-backed source
-- the file-backed source now generates synthetic YUV420P raw frames
-- `VideoEncoder` now runs a real FFmpeg H.264 encoder path
-- `FlvMuxer` now emits real FLV video payload/tag bytes
-- `RtmpPublisher` now performs real RTMP handshake, command exchange, chunking, and socket send
-- FFmpeg 6 is vendored under `third_party/ffmpeg6.0`
-- the old stage-0 `stage0_probe` entry has been removed
+## Current milestone
 
-## Current runnable entry
+- `stage1_video_trace` now targets Windows live-device capture instead of media-file input.
+- Camera capture now goes through `Media Foundation`.
+- Microphone capture now goes through `WASAPI/MMDevice`.
+- Video is encoded with FFmpeg H.264 and audio is encoded with FFmpeg AAC.
+- `FlvMuxer` emits real FLV video/audio payloads and tags.
+- `RtmpPublisher` performs real RTMP handshake, metadata send, chunking, and media publish.
+- FFmpeg 6 remains vendored under `third_party/ffmpeg6.0`.
 
-The current executable entry is `stage1_video_trace`:
+Current stage-1 pipeline:
 
-`file-backed VideoCaptureSource(raw YUV420P) -> AvTimeline -> VideoEncoder(FFmpeg H.264) -> FlvMuxer(real FLV video bytes) -> RtmpPublisher(real RTMP publish)`
+`LiveDeviceCaptureSource(Media Foundation + WASAPI) -> VideoEncoder(H.264) + AudioEncoder(AAC) -> FlvMuxer(FLV tags) -> RtmpPublisher(RTMP publish)`
 
-The default source profile lives at:
+Media-file input has been removed from `stage1_video_trace`. If offline testing is needed later, it should move to dedicated raw `yuv + pcm` tooling instead of the live-device entry.
 
-`apps/stage1_video_trace/default_video_source.txt`
+## Default live capture profile
 
-It uses a simple `key=value` format:
+The default capture profile lives at:
+
+`apps/stage1_video_trace/default_live_devices.txt`
+
+Example:
 
 ```text
-source_label=file-source-demo-0
-width=1280
-height=720
-fps=25
-frame_count=6
+source_label=live-device-demo-0
+video_device=default
+audio_device=default
+width=640
+height=480
+fps=30
+sample_rate=48000
+channels=2
+frame_count=300
 ```
 
-## Build and run
+Notes:
 
-With CMake:
+- `video_device=default` picks the first available camera via Media Foundation.
+- `audio_device=default` picks the default capture endpoint via WASAPI/MMDevice.
+- You can also set friendly names explicitly when you want a specific camera or microphone.
+- Leave `audio_device` empty to run camera-only.
+
+## Build and run
 
 ```powershell
 cmake -S . -B build
@@ -41,48 +53,57 @@ cmake --build build --target stage1_video_trace
 .\build\apps\stage1_video_trace\stage1_video_trace.exe
 ```
 
-The project now expects FFmpeg to live in:
-
-`third_party/ffmpeg6.0`
-
-With the helper script:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build_stage1_video_trace.ps1
-```
-
-You can also override the RTMP URL, source file, and frame count:
+Override RTMP URL, capture profile, or target video-frame count:
 
 ```powershell
 .\build\apps\stage1_video_trace\stage1_video_trace.exe rtmp://127.0.0.1/live/demo
-.\build\apps\stage1_video_trace\stage1_video_trace.exe rtmp://127.0.0.1/live/demo .\apps\stage1_video_trace\default_video_source.txt
-.\build\apps\stage1_video_trace\stage1_video_trace.exe rtmp://127.0.0.1/live/demo .\apps\stage1_video_trace\default_video_source.txt 8
+.\build\apps\stage1_video_trace\stage1_video_trace.exe rtmp://127.0.0.1/live/demo .\apps\stage1_video_trace\default_live_devices.txt
+.\build\apps\stage1_video_trace\stage1_video_trace.exe rtmp://127.0.0.1/live/demo .\apps\stage1_video_trace\default_live_devices.txt 150
 ```
 
-If the second argument is a plain integer, the app treats it as a `frame_count` override and still uses the default source file.
+If the second argument is a plain integer, the app treats it as a `frame_count` override and still uses the default live capture profile.
 
-For a local protocol smoke test without SRS:
+## Verification status
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\rtmp_fake_server_smoke_test.ps1
-```
+Verified on the current workstation:
+
+- `stage1_video_trace` builds successfully with the current MinGW + vendored FFmpeg toolchain.
+- A local fake-server smoke test succeeded with:
+  - `video_device=default`
+  - `audio_device=default`
+  - `640x480 @ 30fps`
+- The fake server observed:
+  - RTMP `connect -> createStream -> publish`
+  - `@setDataFrame/onMetaData`
+  - video sequence header
+  - AAC sequence header
+  - H.264 video frames
+  - AAC audio frames
+- A real SRS publish also succeeded with the Windows-native live-device path:
+  - `publisher entered publishing state for rtmp://192.168.99.128:1935/live/livestream`
+  - video and audio sequence headers were sent
+  - media ran through `video frame#299`
+  - the session ended with `stage1 trace finished cleanly`
+- Device-selection logs now distinguish requested names from selected names.
+- If a requested camera or microphone is not found, the error now includes the offered friendly-name list.
 
 ## Pointers
 
-- `src/capture/VideoCaptureSource.hpp`
-  - controllable file-backed source today, real camera backend later
-  - currently synthesizes YUV420P payloads from the source profile
+- `src/capture/LiveDeviceCaptureSource.hpp`
+  - Media Foundation camera capture, WASAPI microphone capture, and unified event output
 - `src/encode/VideoEncoder.hpp`
-  - real FFmpeg-backed H.264 encoder output
+  - FFmpeg H.264 encoder output
+- `src/encode/AudioEncoder.hpp`
+  - FFmpeg AAC encoder output
+- `src/mux/FlvMuxer.hpp`
+  - FLV video/audio payload and tag assembly
 - `src/publish/RtmpPublisher.hpp`
-  - real RTMP transport for stage-1 video publish
+  - RTMP transport for stage-1 publish
 - `docs/stage.md`
-  - single evolving stage document from `main()` to the current publish boundary
+  - stage document for the current runnable chain
 
 ## Next step
 
-The next stage-1 tasks remain:
-
-1. replace the synthetic file-backed raw frame generator with a real camera source or a true file payload reader
-2. connect to SRS and verify the first viewer-side HTTP-FLV frame end to end
-3. extend stage 1 beyond video-only into audio capture, AAC encode, and A/V interleave
+1. Add an explicit device-list mode so camera and microphone names can be copied without relying on failure logs.
+2. Add reconnect and publish-failure recovery around the live RTMP session.
+3. Add dedicated offline raw `yuv + pcm` test tooling if longer deterministic tests are needed.

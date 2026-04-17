@@ -26,9 +26,9 @@ bool tryParsePositiveInt(const char* text, int* outValue) {
     return true;
 }
 
-void printUsage(const std::filesystem::path& defaultSourceFile) {
-    std::cout << "usage: stage1_video_trace [rtmp_url] [source_file|frame_count] [frame_count]\n";
-    std::cout << "default source file: " << defaultSourceFile.string() << "\n";
+void printUsage(const std::filesystem::path& defaultCaptureConfig) {
+    std::cout << "usage: stage1_video_trace [rtmp_url] [capture_config|frame_count] [frame_count]\n";
+    std::cout << "default live capture config: " << defaultCaptureConfig.string() << "\n";
 }
 
 }  // namespace
@@ -36,17 +36,17 @@ void printUsage(const std::filesystem::path& defaultSourceFile) {
 int main(int argc, char** argv) {
     const std::filesystem::path projectRoot =
         std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
-    const std::filesystem::path defaultSourceFile = projectRoot / "apps" / "stage1_video_trace" /
-                                                    "default_video_source.txt";
+    const std::filesystem::path defaultCaptureConfig = projectRoot / "apps" / "stage1_video_trace" /
+                                                       "default_live_devices.txt";
 
     std::string rtmpUrl = "rtmp://127.0.0.1/live/stage1-trace";
-    std::string sourceConfigPath = defaultSourceFile.string();
+    std::string captureConfigPath = defaultCaptureConfig.string();
     int frameCountOverride = 0;
 
     if (argc >= 2 && argv[1] != nullptr) {
         const std::string firstArg = argv[1];
         if (firstArg == "--help" || firstArg == "-h") {
-            printUsage(defaultSourceFile);
+            printUsage(defaultCaptureConfig);
             return 0;
         }
         rtmpUrl = argv[1];
@@ -56,13 +56,13 @@ int main(int argc, char** argv) {
         if (tryParsePositiveInt(argv[2], &parsedFrameCount)) {
             frameCountOverride = parsedFrameCount;
         } else {
-            sourceConfigPath = argv[2];
+            captureConfigPath = argv[2];
         }
     }
     if (argc >= 4 && argv[3] != nullptr) {
         if (!tryParsePositiveInt(argv[3], &frameCountOverride)) {
             std::cerr << "frame_count must be a positive integer\n";
-            printUsage(defaultSourceFile);
+            printUsage(defaultCaptureConfig);
             return 1;
         }
     }
@@ -74,16 +74,16 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    spdlog::info("[app] duanshipin-live-studio stage 1 video trace");
-    spdlog::info("[app] rtmp_url={} source_file={} frame_count_override={}",
+    spdlog::info("[app] duanshipin-live-studio stage 1 live device trace");
+    spdlog::info("[app] rtmp_url={} capture_config={} frame_count_override={}",
                  rtmpUrl,
-                 sourceConfigPath,
+                 captureConfigPath,
                  frameCountOverride);
 
     live_studio::TraceLog trace;
     live_studio::session::LiveSessionController controller;
     const live_studio::Status status =
-        controller.runStage1VideoTrace(rtmpUrl, sourceConfigPath, frameCountOverride, &trace);
+        controller.runStage1VideoTrace(rtmpUrl, captureConfigPath, frameCountOverride, &trace);
 
     if (!status.ok()) {
         spdlog::error("[app] stage 1 trace failed: {}", status.message);
@@ -92,8 +92,9 @@ int main(int argc, char** argv) {
     }
 
     spdlog::info("[app] controller={}", controller.moduleName());
-    spdlog::info("[app] current milestone status: file-backed raw frames + real H.264 encode + real FLV video bytes + real RTMP publish");
-    spdlog::info("[app] capture source now carries synthetic YUV420P payloads; stage1 still lacks real camera/file decode and SRS viewer-side validation");
+    spdlog::info(
+        "[app] current milestone status: real camera capture + optional microphone capture + real H.264/AAC encode + real FLV bytes + real RTMP publish");
+    spdlog::info("[app] media-file input has been removed from stage1_video_trace; offline raw-file testing should move to dedicated YUV/PCM tooling");
     spdlog::info("[app] log_file={}", live_studio::logging::currentLogFilePath());
     live_studio::logging::shutdown();
     return 0;

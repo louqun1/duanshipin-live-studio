@@ -1,5 +1,7 @@
 add_executable(stage1_video_trace
     main.cpp
+    ${CMAKE_SOURCE_DIR}/src/capture/LiveDeviceCaptureSource.cpp
+    ${CMAKE_SOURCE_DIR}/src/encode/AudioEncoder.cpp
     ${CMAKE_SOURCE_DIR}/src/encode/VideoEncoder.cpp
     ${CMAKE_SOURCE_DIR}/src/publish/RtmpPublisher.cpp
 )
@@ -15,10 +17,24 @@ target_link_libraries(stage1_video_trace
     PRIVATE
         FFmpeg::avcodec
         FFmpeg::avutil
+        FFmpeg::swresample
+        FFmpeg::swscale
 )
 
 if(WIN32)
-    target_link_libraries(stage1_video_trace PRIVATE ws2_32)
+    target_link_libraries(stage1_video_trace
+        PRIVATE
+            avrt
+            ksuser
+            mf
+            mfplat
+            mfreadwrite
+            mfuuid
+            mmdevapi
+            ole32
+            uuid
+            ws2_32
+    )
 endif()
 
 set_target_properties(stage1_video_trace PROPERTIES
