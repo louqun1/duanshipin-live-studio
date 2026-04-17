@@ -73,6 +73,12 @@ std::string trim(const std::string& text) {
     return text.substr(first, last - first);
 }
 
+std::int64_t steadyClockNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 Status parsePositiveInt(const std::string& key, const std::string& value, int* outValue) {
     if (outValue == nullptr) {
         return Status::InvalidArgument("outValue is null");
@@ -530,6 +536,7 @@ void initializeVideoFrame(const media::LiveDeviceCaptureConfig& config,
     outFrame->height = actualHeight;
     outFrame->fps = actualFps;
     outFrame->ptsMs = ptsMs;
+    outFrame->captureWallClockNs = steadyClockNowNs();
     outFrame->hasPixelPayload = true;
     outFrame->pixelFormat = media::VideoPixelFormat::yuv420p;
     outFrame->lineStrideY = actualWidth;
@@ -873,6 +880,7 @@ Status wasapiPacketToAudioFrame(const media::LiveDeviceCaptureConfig& config,
     outFrame->channels = formatInfo.channels;
     outFrame->samplesPerChannel = static_cast<int>(frameCount);
     outFrame->ptsMs = ptsMs;
+    outFrame->captureWallClockNs = steadyClockNowNs();
     outFrame->hasSamplePayload = true;
     outFrame->sampleFormat = media::AudioSampleFormat::s16_interleaved;
     outFrame->samplePayload.assign(static_cast<std::size_t>(frameCount) * static_cast<std::size_t>(formatInfo.channels) *

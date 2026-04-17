@@ -1,5 +1,9 @@
 #pragma once
 
+#include <chrono>
+#include <cstdint>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -12,6 +16,94 @@
 #include "publish/RtmpPublisher.hpp"
 
 namespace live_studio::session {
+
+namespace detail {
+
+struct FirstCapturePoint {
+    bool seen = false;
+    int frameIndex = -1;
+    std::int64_t ptsMs = 0;
+    std::int64_t wallClockNs = 0;
+};
+
+struct FirstPublishLatencySample {
+    bool completed = false;
+    std::string mediaKind;
+    int captureFrameIndex = -1;
+    int sentFrameIndex = -1;
+    std::int64_t capturePtsMs = 0;
+    std::int64_t captureWallClockNs = 0;
+    std::int64_t sendDoneWallClockNs = 0;
+    std::string messageSummary;
+
+    [[nodiscard]] std::int64_t latencyNs() const noexcept {
+        return sendDoneWallClockNs - captureWallClockNs;
+    }
+};
+
+inline std::int64_t steadyClockNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+inline std::string formatLatencyMs(std::int64_t latencyNs) {
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(3) << (static_cast<double>(latencyNs) / 1000000.0);
+    return stream.str();
+}
+
+inline void rememberFirstCapture(const media::VideoFrame& frame, FirstCapturePoint* outPoint) {
+    if (outPoint == nullptr || outPoint->seen || frame.captureWallClockNs <= 0) {
+        return;
+    }
+
+    outPoint->seen = true;
+    outPoint->frameIndex = frame.frameIndex;
+    outPoint->ptsMs = frame.ptsMs;
+    outPoint->wallClockNs = frame.captureWallClockNs;
+}
+
+inline void rememberFirstCapture(const media::AudioFrame& frame, FirstCapturePoint* outPoint) {
+    if (outPoint == nullptr || outPoint->seen || frame.captureWallClockNs <= 0) {
+        return;
+    }
+
+    outPoint->seen = true;
+    outPoint->frameIndex = frame.frameIndex;
+    outPoint->ptsMs = frame.ptsMs;
+    outPoint->wallClockNs = frame.captureWallClockNs;
+}
+
+inline bool completeFirstPublishLatency(const std::string& mediaKind,
+                                        const FirstCapturePoint& capturePoint,
+                                        int sentFrameIndex,
+                                        const std::string& messageSummary,
+                                        FirstPublishLatencySample* outSample) {
+    if (outSample == nullptr || outSample->completed || !capturePoint.seen || capturePoint.wallClockNs <= 0) {
+        return false;
+    }
+
+    outSample->completed = true;
+    outSample->mediaKind = mediaKind;
+    outSample->captureFrameIndex = capturePoint.frameIndex;
+    outSample->sentFrameIndex = sentFrameIndex;
+    outSample->capturePtsMs = capturePoint.ptsMs;
+    outSample->captureWallClockNs = capturePoint.wallClockNs;
+    outSample->sendDoneWallClockNs = steadyClockNowNs();
+    outSample->messageSummary = messageSummary;
+    return true;
+}
+
+inline std::string formatLatencySummary(const std::string& label, const FirstPublishLatencySample& sample) {
+    return label + ": media=" + sample.mediaKind + " capture_frame#" + std::to_string(sample.captureFrameIndex) +
+           " sent_frame#" + std::to_string(sample.sentFrameIndex) + " capture_pts=" +
+           std::to_string(sample.capturePtsMs) + "ms latency=" + formatLatencyMs(sample.latencyNs()) +
+           "ms capture_wall_ns=" + std::to_string(sample.captureWallClockNs) + " send_done_wall_ns=" +
+           std::to_string(sample.sendDoneWallClockNs) + " message=" + sample.messageSummary;
+}
+
+}  // namespace detail
 
 class LiveSessionController {
 public:
@@ -52,6 +144,11 @@ public:
 
         bool captureStarted = false;
         bool publisherConnected = false;
+        detail::FirstCapturePoint firstVideoCapture;
+        detail::FirstCapturePoint firstAudioCapture;
+        detail::FirstPublishLatencySample firstMediaPublishLatency;
+        detail::FirstPublishLatencySample firstVideoPublishLatency;
+        detail::FirstPublishLatencySample firstAudioPublishLatency;
         const auto fail = [&](Status status) {
             if (captureStarted) {
                 capture.stop();
@@ -63,6 +160,9 @@ public:
         };
 
         trace->push("session", "stage1 trace begins");
+        trace->push("latency",
+                    "push-side latency probe armed: measuring first real media packet from capture wall clock to "
+                    "send completion; metadata and sequence headers are excluded");
 
         Status status = capture.configureDeviceSource(captureConfigPath);
         if (!status.ok()) {
@@ -208,6 +308,7 @@ public:
             }
 
             if (event.kind == capture::CaptureEventKind::video) {
+                detail::rememberFirstCapture(event.videoFrame, &firstVideoCapture);
                 trace->push("capture",
                             "video frame#" + std::to_string(event.videoFrame.frameIndex) + " pts=" +
                                 std::to_string(event.videoFrame.ptsMs) + "ms source=" + event.videoFrame.sourceLabel +
@@ -247,11 +348,28 @@ public:
                             "video frame#" + std::to_string(message.frameIndex) + " message ts=" +
                                 std::to_string(message.timestampMs) + "ms " + message.payloadSummary + " payload=" +
                                 std::to_string(message.payloadBytes.size()) + "B");
+                if (detail::completeFirstPublishLatency("video",
+                                                        firstVideoCapture,
+                                                        message.frameIndex,
+                                                        message.payloadSummary,
+                                                        &firstVideoPublishLatency)) {
+                    trace->push("latency",
+                                detail::formatLatencySummary("first-video-packet", firstVideoPublishLatency));
+                }
+                if (detail::completeFirstPublishLatency("video",
+                                                        firstVideoCapture,
+                                                        message.frameIndex,
+                                                        message.payloadSummary,
+                                                        &firstMediaPublishLatency)) {
+                    trace->push("latency",
+                                detail::formatLatencySummary("first-media-packet", firstMediaPublishLatency));
+                }
 
                 ++publishedVideoFrames;
                 continue;
             }
 
+            detail::rememberFirstCapture(event.audioFrame, &firstAudioCapture);
             trace->push("capture",
                         "audio frame#" + std::to_string(event.audioFrame.frameIndex) + " pts=" +
                             std::to_string(event.audioFrame.ptsMs) + "ms samples=" +
@@ -293,6 +411,22 @@ public:
                             "audio frame#" + std::to_string(message.frameIndex) + " message ts=" +
                                 std::to_string(message.timestampMs) + "ms " + message.payloadSummary + " payload=" +
                                 std::to_string(message.payloadBytes.size()) + "B");
+                if (detail::completeFirstPublishLatency("audio",
+                                                        firstAudioCapture,
+                                                        message.frameIndex,
+                                                        message.payloadSummary,
+                                                        &firstAudioPublishLatency)) {
+                    trace->push("latency",
+                                detail::formatLatencySummary("first-audio-packet", firstAudioPublishLatency));
+                }
+                if (detail::completeFirstPublishLatency("audio",
+                                                        firstAudioCapture,
+                                                        message.frameIndex,
+                                                        message.payloadSummary,
+                                                        &firstMediaPublishLatency)) {
+                    trace->push("latency",
+                                detail::formatLatencySummary("first-media-packet", firstMediaPublishLatency));
+                }
             }
         }
 
@@ -323,6 +457,22 @@ public:
                             "flushed audio message ts=" + std::to_string(message.timestampMs) + "ms " +
                                 message.payloadSummary + " payload=" +
                                 std::to_string(message.payloadBytes.size()) + "B");
+                if (detail::completeFirstPublishLatency("audio",
+                                                        firstAudioCapture,
+                                                        message.frameIndex,
+                                                        message.payloadSummary,
+                                                        &firstAudioPublishLatency)) {
+                    trace->push("latency",
+                                detail::formatLatencySummary("first-audio-packet", firstAudioPublishLatency));
+                }
+                if (detail::completeFirstPublishLatency("audio",
+                                                        firstAudioCapture,
+                                                        message.frameIndex,
+                                                        message.payloadSummary,
+                                                        &firstMediaPublishLatency)) {
+                    trace->push("latency",
+                                detail::formatLatencySummary("first-media-packet", firstMediaPublishLatency));
+                }
             }
         }
 

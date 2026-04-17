@@ -1,72 +1,72 @@
-# duanshipin-live-studio stage notes
+# duanshipin-live-studio 阶段说明
 
-This document tracks the code path that is actually implemented in the repository today.
+本文记录当前仓库里已经真正落地、能够跑起来的代码链路。
 
-## Current boundary
+## 当前边界
 
-The current runnable entry is:
+当前可运行入口是：
 
 `apps/stage1_video_trace/main.cpp`
 
-The current stage-1 chain is:
+当前阶段 1 链路是：
 
 `main -> initializeDefaultLogger -> LiveSessionController::runStage1VideoTrace -> LiveDeviceCaptureSource(Media Foundation + WASAPI) -> VideoEncoder(H.264) + AudioEncoder(AAC) -> FlvMuxer -> RtmpPublisher`
 
-Current state:
+当前状态：
 
-- `stage1_video_trace` no longer uses media-file input.
-- Camera capture is wired through `Media Foundation`.
-- Microphone capture is wired through `WASAPI/MMDevice`.
-- Video is encoded to real H.264 access units.
-- Audio is encoded to real AAC access units.
-- FLV video and audio tags are built from real encoded bytes.
-- RTMP connect / createStream / publish / metadata / chunked media send are real.
+- `stage1_video_trace` 已经不再使用媒体文件作为输入源。
+- 摄像头采集走 `Media Foundation`。
+- 麦克风采集走 `WASAPI/MMDevice`。
+- 视频会编码成真实的 H.264 access unit。
+- 音频会编码成真实的 AAC access unit。
+- FLV 音视频 tag 由真实编码后的字节构建。
+- RTMP 的 `connect / createStream / publish / metadata / chunked media send` 已经是真实实现。
 
-## Entry and arguments
+## 入口与参数
 
-`main(int argc, char** argv)` in `apps/stage1_video_trace/main.cpp` currently:
+`apps/stage1_video_trace/main.cpp` 里的 `main(int argc, char** argv)` 当前会：
 
-1. Resolves `projectRoot`.
-2. Uses `apps/stage1_video_trace/default_live_devices.txt` as the default live profile.
-3. Parses:
+1. 解析 `projectRoot`。
+2. 使用 `apps/stage1_video_trace/default_live_devices.txt` 作为默认直播配置。
+3. 解析以下参数：
    - `rtmpUrl`
    - `captureConfigPath`
    - `frameCountOverride`
-4. Initializes the logger.
-5. Calls `LiveSessionController::runStage1VideoTrace(...)`.
+4. 初始化日志器。
+5. 调用 `LiveSessionController::runStage1VideoTrace(...)`。
 
-## Live session controller
+## 直播会话控制器
 
 `src/session/LiveSessionController.hpp`
 
-`runStage1VideoTrace(...)` currently orchestrates:
+当前 `runStage1VideoTrace(...)` 负责串起下面这些步骤：
 
 1. `capture.configureDeviceSource(captureConfigPath)`
 2. `capture.start()`
 3. `videoEncoder.configureH264(...)`
-4. optional `audioEncoder.configureAac(...)`
+4. 可选 `audioEncoder.configureAac(...)`
 5. `publisher.configureVideoStream(...)`
-6. optional `publisher.configureAudioStream(...)`
+6. 可选 `publisher.configureAudioStream(...)`
 7. `publisher.connect(rtmpUrl)`
-8. publish H.264 sequence header
-9. optional publish AAC sequence header
-10. loop over live capture events until the target video-frame count is reached
-11. flush pending AAC packets
-12. `capture.stop()` and `publisher.disconnect()`
+8. 发送 H.264 sequence header
+9. 可选发送 AAC sequence header
+10. 循环读取实时采集事件，直到达到目标视频帧数
+11. flush 尚未输出的 AAC 包
+12. `capture.stop()` 与 `publisher.disconnect()`
 
-The capture loop is event-driven:
+采集循环当前是事件驱动的：
 
-- video events go through `VideoEncoder -> FlvMuxer::buildVideoNaluTag -> RtmpPublisher`
-- audio events go through `AudioEncoder -> FlvMuxer::buildAudioRawTag -> RtmpPublisher`
+- 视频事件走 `VideoEncoder -> FlvMuxer::buildVideoNaluTag -> RtmpPublisher`
+- 音频事件走 `AudioEncoder -> FlvMuxer::buildAudioRawTag -> RtmpPublisher`
 
-## Live device capture
+## 实时设备采集
 
 `src/capture/LiveDeviceCaptureSource.hpp`
 `src/capture/LiveDeviceCaptureSource.cpp`
 
-Implemented pieces:
+当前已实现：
 
-- text profile parsing for:
+- 文本配置解析，支持：
   - `source_label`
   - `video_device`
   - `audio_device`
@@ -76,75 +76,75 @@ Implemented pieces:
   - `sample_rate`
   - `channels`
   - `frame_count`
-- camera selection through Media Foundation device enumeration
-- microphone selection through WASAPI/MMDevice endpoint enumeration
-- Media Foundation sample conversion into raw YUV420P frames
-- WASAPI packet conversion into interleaved S16 PCM frames
-- capture threads for audio/video and a shared event queue
-- event output as:
+- 通过 Media Foundation 枚举并选择摄像头
+- 通过 WASAPI/MMDevice 枚举并选择麦克风
+- 将 Media Foundation sample 转成原始 YUV420P 视频帧
+- 将 WASAPI packet 转成交错的 S16 PCM 音频帧
+- 音视频各自采集线程，以及共享事件队列
+- 事件输出类型：
   - `CaptureEventKind::video`
   - `CaptureEventKind::audio`
 
-Current selection behavior:
+当前选择行为：
 
-- `video_device=default` picks the first available Media Foundation camera
-- `audio_device=default` picks the default WASAPI capture endpoint
-- explicit friendly names are also supported
+- `video_device=default` 选择第一个可用的 Media Foundation 摄像头
+- `audio_device=default` 选择默认的 WASAPI 采集端点
+- 也支持显式填写 friendly name
 
-## Encoders
+## 编码器
 
 `src/encode/VideoEncoder.cpp`
 
-- real FFmpeg H.264 encoder
-- extracts SPS/PPS from encoder extradata
-- returns `media::EncodedVideoAccessUnit`
+- 真实的 FFmpeg H.264 编码器
+- 从编码器 extradata 中提取 SPS/PPS
+- 返回 `media::EncodedVideoAccessUnit`
 
 `src/encode/AudioEncoder.cpp`
 
-- real FFmpeg AAC encoder
-- converts interleaved S16 PCM into the encoder sample format
-- buffers samples with `AVAudioFifo`
-- normalizes AAC packet timestamps so FLV/RTMP timestamps stay non-negative
-- returns zero or more `media::EncodedAudioAccessUnit`
-- exposes AAC sequence-header config from encoder extradata
+- 真实的 FFmpeg AAC 编码器
+- 将交错的 S16 PCM 转成编码器需要的采样格式
+- 使用 `AVAudioFifo` 做样本缓存
+- 规范化 AAC 包时间戳，保证 FLV/RTMP 时间戳非负
+- 返回 0 个或多个 `media::EncodedAudioAccessUnit`
+- 从编码器 extradata 中暴露 AAC sequence-header 配置
 
-## FLV mux
+## FLV 封装
 
 `src/mux/FlvMuxer.hpp`
 
-Implemented:
+当前已实现：
 
 - AVC sequence header
-- AVC NALU video tag
+- AVC NALU 视频 tag
 - AAC sequence header
-- AAC raw audio tag
-- real FLV tag header bytes for both tag type `9` and tag type `8`
+- AAC 原始音频 tag
+- 真实的 FLV tag header 字节，覆盖 tag type `9` 和 tag type `8`
 
-## RTMP publisher
+## RTMP 推流器
 
 `src/publish/RtmpPublisher.cpp`
 
-Implemented:
+当前已实现：
 
-- RTMP URL parse
-- TCP connect
+- RTMP URL 解析
+- TCP 连接
 - RTMP simple handshake
 - `connect`
 - `createStream`
 - `publish`
 - `Set Chunk Size`
 - `@setDataFrame/onMetaData`
-- video message mapping/publish
-- audio message mapping/publish
+- 视频消息映射与发送
+- 音频消息映射与发送
 
-Metadata carries video fields when video is configured and audio fields when audio is configured.
+当配置了视频时，metadata 会带上视频字段；当配置了音频时，metadata 会带上音频字段。
 
-## Verification status
+## 验证状态
 
-Verified in code/build:
+代码与构建层面已验证：
 
-- `stage1_video_trace` builds successfully on the current MinGW toolchain
-- Media Foundation and WASAPI link cleanly with:
+- `stage1_video_trace` 能在当前 MinGW 工具链下成功编译
+- Media Foundation 和 WASAPI 已经可以正确链接以下库：
   - `mf`
   - `mfplat`
   - `mfreadwrite`
@@ -154,38 +154,38 @@ Verified in code/build:
   - `uuid`
   - `avrt`
   - `ksuser`
-- FFmpeg-backed encode/mux/publish still builds successfully with:
+- 基于 FFmpeg 的 encode/mux/publish 仍然能正确链接以下库并成功编译：
   - `FFmpeg::avcodec`
   - `FFmpeg::avutil`
   - `FFmpeg::swscale`
   - `FFmpeg::swresample`
 
-Verified at runtime on the current workstation:
+当前工作站上的运行验证结果：
 
-- fake RTMP server smoke test succeeded with default camera + default microphone
-- the server observed:
+- 使用默认摄像头 + 默认麦克风的 fake RTMP server smoke test 已成功
+- 服务端观察到：
   - `connect`
   - `createStream`
   - `publish`
   - `@setDataFrame/onMetaData`
-  - H.264 sequence header + video frames
-  - AAC sequence header + audio frames
-- real SRS publish also succeeded with camera + microphone:
-  - entered publishing state for `rtmp://192.168.99.128:1935/live/livestream`
-  - sent H.264 and AAC sequence headers
-  - ran through `video frame#299`
-  - finished with `stage1 trace finished cleanly`
-- live-device logs now report:
-  - requested camera/microphone names before start
-  - selected camera/microphone friendly names after startup
-  - offered device-name lists when lookup fails
+  - H.264 sequence header + 视频帧
+  - AAC sequence header + 音频帧
+- 使用摄像头 + 麦克风向真实 SRS 推流也已成功：
+  - 进入 `rtmp://192.168.99.128:1935/live/livestream` 的 publishing 状态
+  - 已发送 H.264 和 AAC sequence header
+  - 已跑到 `video frame#299`
+  - 最终以 `stage1 trace finished cleanly` 正常结束
+- 实时设备日志现在会额外报告：
+  - 启动前请求的摄像头/麦克风名称
+  - 启动后实际选中的摄像头/麦克风 friendly name
+  - 查找失败时可供选择的设备名列表
 
-## Removed from stage1 entry
+## 已从阶段 1 入口移除
 
-Removed from `stage1_video_trace`:
+当前从 `stage1_video_trace` 中移除的内容有：
 
-- media-file input as the live source
-- synthetic/file-backed stage-1 usage and docs
-- DirectShow capture as the default camera/microphone path
+- 媒体文件作为直播输入源
+- 基于合成数据或文件的阶段 1 用法与文档
+- DirectShow 作为默认摄像头/麦克风采集路径
 
-If deterministic offline testing is needed later, it should use a separate raw `yuv + pcm` path rather than reusing the live-device entry.
+如果后续需要确定性的离线测试，应走独立的原始 `yuv + pcm` 路径，而不是复用当前的实时设备入口。

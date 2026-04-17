@@ -50,6 +50,7 @@ struct VideoFrame {
     int height = 0;
     int fps = 0;
     std::int64_t ptsMs = 0;
+    std::int64_t captureWallClockNs = 0;
     bool hasPixelPayload = false;
     VideoPixelFormat pixelFormat = VideoPixelFormat::unknown;
     int lineStrideY = 0;
@@ -66,6 +67,7 @@ struct AudioFrame {
     int channels = 0;
     int samplesPerChannel = 0;
     std::int64_t ptsMs = 0;
+    std::int64_t captureWallClockNs = 0;
     bool hasSamplePayload = false;
     AudioSampleFormat sampleFormat = AudioSampleFormat::unknown;
     std::vector<std::uint8_t> samplePayload;
