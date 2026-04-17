@@ -92,8 +92,8 @@ int main(int argc, char** argv) {
     }
 
     spdlog::info("[app] controller={}", controller.moduleName());
-    spdlog::info("[app] current milestone status: file-backed raw frames + real H.264 encode + real FLV video bytes + trace RTMP publish");
-    spdlog::info("[app] capture source now carries synthetic YUV420P payloads; RtmpPublisher remains a trace implementation");
+    spdlog::info("[app] current milestone status: file-backed raw frames + real H.264 encode + real FLV video bytes + real RTMP publish");
+    spdlog::info("[app] capture source now carries synthetic YUV420P payloads; stage1 still lacks real camera/file decode and SRS viewer-side validation");
     spdlog::info("[app] log_file={}", live_studio::logging::currentLogFilePath());
     live_studio::logging::shutdown();
     return 0;

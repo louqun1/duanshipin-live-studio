@@ -7,7 +7,7 @@ Current milestone status:
 - the file-backed source now generates synthetic YUV420P raw frames
 - `VideoEncoder` now runs a real FFmpeg H.264 encoder path
 - `FlvMuxer` now emits real FLV video payload/tag bytes
-- `RtmpPublisher` is still a trace placeholder
+- `RtmpPublisher` now performs real RTMP handshake, command exchange, chunking, and socket send
 - FFmpeg 6 is vendored under `third_party/ffmpeg6.0`
 - the old stage-0 `stage0_probe` entry has been removed
 
@@ -15,7 +15,7 @@ Current milestone status:
 
 The current executable entry is `stage1_video_trace`:
 
-`file-backed VideoCaptureSource(raw YUV420P) -> AvTimeline -> VideoEncoder(FFmpeg H.264) -> FlvMuxer(real FLV video bytes) -> RtmpPublisher(trace)`
+`file-backed VideoCaptureSource(raw YUV420P) -> AvTimeline -> VideoEncoder(FFmpeg H.264) -> FlvMuxer(real FLV video bytes) -> RtmpPublisher(real RTMP publish)`
 
 The default source profile lives at:
 
@@ -61,6 +61,12 @@ You can also override the RTMP URL, source file, and frame count:
 
 If the second argument is a plain integer, the app treats it as a `frame_count` override and still uses the default source file.
 
+For a local protocol smoke test without SRS:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\rtmp_fake_server_smoke_test.ps1
+```
+
 ## Pointers
 
 - `src/capture/VideoCaptureSource.hpp`
@@ -69,7 +75,7 @@ If the second argument is a plain integer, the app treats it as a `frame_count` 
 - `src/encode/VideoEncoder.hpp`
   - real FFmpeg-backed H.264 encoder output
 - `src/publish/RtmpPublisher.hpp`
-  - trace RTMP planning only, no real socket send yet
+  - real RTMP transport for stage-1 video publish
 - `docs/stage.md`
   - single evolving stage document from `main()` to the current publish boundary
 
@@ -78,5 +84,5 @@ If the second argument is a plain integer, the app treats it as a `frame_count` 
 The next stage-1 tasks remain:
 
 1. replace the synthetic file-backed raw frame generator with a real camera source or a true file payload reader
-2. replace the trace `RtmpPublisher` with real RTMP handshake, chunking, and socket send logic
-3. connect to SRS and verify the first viewer-side HTTP-FLV frame end to end
+2. connect to SRS and verify the first viewer-side HTTP-FLV frame end to end
+3. extend stage 1 beyond video-only into audio capture, AAC encode, and A/V interleave

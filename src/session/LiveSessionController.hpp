@@ -87,6 +87,15 @@ public:
                     "FFmpeg encoder configured: H.264 " + std::to_string(capture.config().width) + "x" +
                         std::to_string(capture.config().height) + " bitrate=2000000");
 
+        status = publisher.configureVideoStream(capture.config().width, capture.config().height, capture.config().fps);
+        if (!status.ok()) {
+            return status;
+        }
+        trace->push("publish",
+                    "publisher video stream configured: " + std::to_string(capture.config().width) + "x" +
+                        std::to_string(capture.config().height) + " @" + std::to_string(capture.config().fps) +
+                        "fps");
+
         status = publisher.connect(rtmpUrl);
         if (!status.ok()) {
             return status;

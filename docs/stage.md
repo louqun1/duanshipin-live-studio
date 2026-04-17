@@ -16,7 +16,7 @@
 
 当前已经实现的完整链路是：
 
-`main -> initializeDefaultLogger -> LiveSessionController::runStage1VideoTrace -> VideoCaptureSource(file) -> AvTimeline -> VideoEncoder(FFmpeg H.264) -> FlvMuxer(real FLV video bytes) -> RtmpPublisher(trace)`
+`main -> initializeDefaultLogger -> LiveSessionController::runStage1VideoTrace -> VideoCaptureSource(file) -> AvTimeline -> VideoEncoder(FFmpeg H.264) -> FlvMuxer(real FLV video bytes) -> RtmpPublisher(real RTMP publish)`
 
 这里的“推流全过程”目前指的是：
 
@@ -24,9 +24,10 @@
 - 已经用 FFmpeg 生成真实的 H.264 access unit
 - 已经把 H.264 结果封装成带真实 `payloadBytes/tagBytes` 的 `FlvVideoTagPlan`
 - 已经把 `FlvVideoTagPlan.payloadBytes` 映射成 `RtmpMessagePlan.payloadBytes`
-- 已经调用 `RtmpPublisher::publishVideoTag()`
+- 已经完成真实 RTMP 握手、command message、chunk 组包和 socket 发送
+- 已经调用 `RtmpPublisher::publishVideoTag()` 把 sequence header 和视频帧写到真实 TCP 连接
 
-这里还没有实现真实网络 RTMP 发送。当前 `publish` 的收口点是进程内的 trace 发布，而不是 socket 发包。
+当前还没有完成的是 SRS 端到端验收，以及观众侧 HTTP-FLV 首帧验证。
 
 ## 2. 入口到推流的完整调用链
 
@@ -103,14 +104,15 @@
 3. `capture.start()`
 4. `timeline.configureVideoClock(capture.config().fps)`
 5. `encoder.configureH264(...)`
-6. `publisher.connect(rtmpUrl)`
-7. `encoder.buildSequenceHeader(&parameterSets)`
-8. `muxer.buildVideoSequenceHeader(parameterSets, &sequenceHeaderTag)`
-9. `publisher.mapVideoTagToMessage(sequenceHeaderTag, &sequenceHeaderMessage)`
-10. `publisher.publishVideoTag(sequenceHeaderMessage)`
-11. 进入逐帧循环
-12. 循环结束后执行 `capture.stop()` 和 `publisher.disconnect()`
-13. `trace->push("session", "stage1 trace finished cleanly")`
+6. `publisher.configureVideoStream(...)`
+7. `publisher.connect(rtmpUrl)`
+8. `encoder.buildSequenceHeader(&parameterSets)`
+9. `muxer.buildVideoSequenceHeader(parameterSets, &sequenceHeaderTag)`
+10. `publisher.mapVideoTagToMessage(sequenceHeaderTag, &sequenceHeaderMessage)`
+11. `publisher.publishVideoTag(sequenceHeaderMessage)`
+12. 进入逐帧循环
+13. 循环结束后执行 `capture.stop()` 和 `publisher.disconnect()`
+14. `trace->push("session", "stage1 trace finished cleanly")`
 
 ## 5. 文件源加载与原始帧生成
 
@@ -329,7 +331,7 @@
   - `avc-keyframe-tag(...)`
   - `avc-interframe-tag(...)`
 
-## 9. RTMP 发布规划层
+## 9. RTMP 发布层
 
 文件：
 
@@ -337,6 +339,7 @@
 
 关键函数：
 
+- `configureVideoStream(int width, int height, int fps)`
 - `connect(const std::string& url)`
 - `mapVideoTagToMessage(const media::FlvVideoTagPlan& tag, media::RtmpMessagePlan* outMessage) const`
 - `publishVideoTag(const media::RtmpMessagePlan& message)`
@@ -344,36 +347,51 @@
 
 当前实现行为：
 
-### 9.1 `connect()`
+### 9.1 `configureVideoStream()`
 
-- 校验 `rtmp://` 前缀
-- 把内部状态从 `idle` 变到 `publishing`
-- 保存 URL
+- 保存视频宽、高、帧率
+- 供 `connect()` 阶段自动发送 `@setDataFrame/onMetaData`
 
-这里没有真实 socket，也没有 RTMP 握手。
+### 9.2 `connect()`
 
-### 9.2 `mapVideoTagToMessage()`
+- 解析 `rtmp://host[:port]/app/stream`
+- 建立 TCP socket
+- 完成 RTMP simple handshake
+- 发送并等待：
+  - `connect`
+  - `createStream`
+  - `publish`
+- 发送 `Set Chunk Size`
+- 如果已经配置视频流信息，则发送 `@setDataFrame/onMetaData`
+- 成功后把内部状态切到 `publishing`
+- 保存 URL 和服务端返回的 `streamId`
+
+### 9.3 `mapVideoTagToMessage()`
 
 - 把 `FlvVideoTagPlan` 映射成 `RtmpMessagePlan`
 - 固定写入：
   - `chunkStreamId = 6`
-  - `messageStreamId = 1`
+  - `messageStreamId = 当前 RTMP streamId`
   - `typeId = 9`
 - 把 `FlvVideoTagPlan.payloadBytes` 原样拷贝到 `RtmpMessagePlan.payloadBytes`
 
-### 9.3 `publishVideoTag()`
+### 9.4 `publishVideoTag()`
 
 - 校验当前状态必须是 `publishing`
 - 校验 `message.payloadBytes` 非空
-- 只把 `lastPublishedSummary_` 更新成最近一次消息摘要
+- 按当前 chunk size 组装 RTMP chunk
+- 通过真实 socket 写出 message payload
+- 成功后把 `lastPublishedSummary_` 更新成最近一次消息摘要
 
 这就是当前“推流”流程的最后一步。
 
-### 9.4 `disconnect()`
+### 9.5 `disconnect()`
 
 - 清空状态
 - 清空 URL
 - 清空 `lastPublishedSummary_`
+- 关闭 socket
+- 释放 socket 子系统状态
 
 ## 10. 帧循环的真实执行顺序
 
@@ -441,9 +459,6 @@
 - `LiveSessionController::openSingleVideoStage()`
 - 真实摄像头采集
 - 真实文件解码读帧
-- 真实 RTMP 握手
-- 真实 RTMP chunk 组包
-- 真实 RTMP socket 发送
 - SRS 端到端验收
 
 ## 13. 后续新增模块时怎么续写
