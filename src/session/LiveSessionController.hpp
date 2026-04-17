@@ -1,6 +1,8 @@
 #pragma once
 
+#include <chrono>
 #include <string>
+#include <thread>
 
 #include "capture/VideoCaptureSource.hpp"
 #include "common/TraceLog.hpp"
@@ -134,12 +136,18 @@ public:
                     "planned RTMP sequence header message: " + sequenceHeaderMessage.payloadSummary + " payload=" +
                         std::to_string(sequenceHeaderMessage.payloadBytes.size()) + "B");
 
+        const auto publishStartTime = std::chrono::steady_clock::now();
+        trace->push("timeline", "real-time pacing enabled from video pts");
+
         for (int i = 0; i < frameCount; ++i) {
             timeline::VideoTick tick;
             status = timeline.nextVideoTick(&tick);
             if (!status.ok()) {
                 return status;
             }
+
+            const auto scheduledPublishTime = publishStartTime + std::chrono::milliseconds(tick.ptsMs);
+            std::this_thread::sleep_until(scheduledPublishTime);
 
             media::VideoFrame frame;
             status = capture.captureFrame(tick.frameIndex, tick.ptsMs, &frame);
