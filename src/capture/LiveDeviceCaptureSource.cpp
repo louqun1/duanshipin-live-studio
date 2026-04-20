@@ -21,6 +21,7 @@
 #if defined(_WIN32)
 #include <windows.h>
 #include <audioclient.h>
+#include <initguid.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <mfapi.h>
 #include <mferror.h>
@@ -960,16 +961,17 @@ struct AudioCaptureThreadState {
     }
 };
 
-Status createSourceReaderForCamera(const media::LiveDeviceCaptureConfig& config,
-                                   VideoCaptureThreadState* outState) {
-    if (outState == nullptr) {
-        return Status::InvalidArgument("outState is null");
+Status selectVideoDeviceActivate(const std::string& requestedDeviceId,
+                                 IMFActivate** outSelectedActivate,
+                                 std::string* outSelectedDeviceName,
+                                 std::vector<std::string>* outAvailableNames) {
+    if (outSelectedActivate == nullptr || outSelectedDeviceName == nullptr || outAvailableNames == nullptr) {
+        return Status::InvalidArgument("video device selection outputs are null");
     }
 
-    const HRESULT startupHr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
-    if (FAILED(startupHr)) {
-        return hresultStatus("MFStartup", startupHr);
-    }
+    *outSelectedActivate = nullptr;
+    outSelectedDeviceName->clear();
+    outAvailableNames->clear();
 
     IMFAttributes* enumAttributes = nullptr;
     IMFActivate** devices = nullptr;
@@ -977,7 +979,6 @@ Status createSourceReaderForCamera(const media::LiveDeviceCaptureConfig& config,
 
     const HRESULT attributesHr = MFCreateAttributes(&enumAttributes, 1);
     if (FAILED(attributesHr)) {
-        MFShutdown();
         return hresultStatus("MFCreateAttributes(video enum)", attributesHr);
     }
 
@@ -985,20 +986,17 @@ Status createSourceReaderForCamera(const media::LiveDeviceCaptureConfig& config,
                                          MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID);
     if (FAILED(hr)) {
         safeRelease(&enumAttributes);
-        MFShutdown();
         return hresultStatus("IMFAttributes::SetGUID(video source type)", hr);
     }
 
     hr = MFEnumDeviceSources(enumAttributes, &devices, &deviceCount);
     safeRelease(&enumAttributes);
     if (FAILED(hr)) {
-        MFShutdown();
         return hresultStatus("MFEnumDeviceSources(video)", hr);
     }
 
     IMFActivate* selectedActivate = nullptr;
     std::string selectedDeviceName;
-    std::vector<std::string> offeredNames;
     for (UINT32 i = 0; i < deviceCount; ++i) {
         WCHAR* friendlyName = nullptr;
         UINT32 friendlyNameLength = 0;
@@ -1008,8 +1006,8 @@ Status createSourceReaderForCamera(const media::LiveDeviceCaptureConfig& config,
             friendlyName != nullptr) {
             const std::wstring wideName(friendlyName, friendlyNameLength);
             const std::string utf8Name = wideToUtf8(wideName);
-            offeredNames.push_back(utf8Name);
-            if (selectedActivate == nullptr && matchesRequestedDeviceName(config.videoDeviceId, wideName)) {
+            outAvailableNames->push_back(utf8Name);
+            if (selectedActivate == nullptr && matchesRequestedDeviceName(requestedDeviceId, wideName)) {
                 selectedActivate = devices[i];
                 selectedActivate->AddRef();
                 selectedDeviceName = utf8Name;
@@ -1024,57 +1022,58 @@ Status createSourceReaderForCamera(const media::LiveDeviceCaptureConfig& config,
     CoTaskMemFree(devices);
 
     if (selectedActivate == nullptr) {
-        MFShutdown();
         return Status::InvalidArgument("camera device not found for Media Foundation: requested=\"" +
-                                       config.videoDeviceId + "\" offered=" + joinQuotedStrings(offeredNames));
+                                       requestedDeviceId + "\" offered=" + joinQuotedStrings(*outAvailableNames));
     }
 
-    outState->selectedDeviceName = selectedDeviceName;
+    *outSelectedActivate = selectedActivate;
+    *outSelectedDeviceName = std::move(selectedDeviceName);
+    return Status::Ok();
+}
 
-    hr = selectedActivate->ActivateObject(IID_IMFMediaSource, reinterpret_cast<void**>(&outState->mediaSource));
-    safeRelease(&selectedActivate);
+Status initializeVideoSourceReader(IMFActivate* selectedActivate,
+                                   const media::LiveDeviceCaptureConfig& config,
+                                   VideoCaptureThreadState* outState) {
+    if (selectedActivate == nullptr || outState == nullptr) {
+        return Status::InvalidArgument("video source reader arguments are null");
+    }
+
+    HRESULT hr = selectedActivate->ActivateObject(IID_IMFMediaSource, reinterpret_cast<void**>(&outState->mediaSource));
     if (FAILED(hr)) {
-        MFShutdown();
         return hresultStatus("IMFActivate::ActivateObject(camera)", hr);
     }
 
     IMFAttributes* readerAttributes = nullptr;
     hr = MFCreateAttributes(&readerAttributes, 1);
     if (FAILED(hr)) {
-        MFShutdown();
         return hresultStatus("MFCreateAttributes(source reader)", hr);
     }
 
     hr = readerAttributes->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, TRUE);
     if (FAILED(hr)) {
         safeRelease(&readerAttributes);
-        MFShutdown();
         return hresultStatus("IMFAttributes::SetUINT32(MF_READWRITE_DISABLE_CONVERTERS)", hr);
     }
 
     hr = MFCreateSourceReaderFromMediaSource(outState->mediaSource, readerAttributes, &outState->sourceReader);
     safeRelease(&readerAttributes);
     if (FAILED(hr)) {
-        MFShutdown();
         return hresultStatus("MFCreateSourceReaderFromMediaSource", hr);
     }
 
     hr = outState->sourceReader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
     if (FAILED(hr)) {
-        MFShutdown();
         return hresultStatus("IMFSourceReader::SetStreamSelection(all streams)", hr);
     }
 
     hr = outState->sourceReader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
     if (FAILED(hr)) {
-        MFShutdown();
         return hresultStatus("IMFSourceReader::SetStreamSelection(first video stream)", hr);
     }
 
     Status selectionStatus =
         chooseBestVideoMediaType(outState->sourceReader, config.width, config.height, config.fps, &outState->selection);
     if (!selectionStatus.ok()) {
-        MFShutdown();
         return selectionStatus;
     }
 
@@ -1082,8 +1081,37 @@ Status createSourceReaderForCamera(const media::LiveDeviceCaptureConfig& config,
                                                      nullptr,
                                                      outState->selection.mediaType);
     if (FAILED(hr)) {
-        MFShutdown();
         return hresultStatus("IMFSourceReader::SetCurrentMediaType(video)", hr);
+    }
+
+    return Status::Ok();
+}
+
+Status createSourceReaderForCamera(const media::LiveDeviceCaptureConfig& config,
+                                   VideoCaptureThreadState* outState) {
+    if (outState == nullptr) {
+        return Status::InvalidArgument("outState is null");
+    }
+
+    const HRESULT startupHr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
+    if (FAILED(startupHr)) {
+        return hresultStatus("MFStartup", startupHr);
+    }
+
+    IMFActivate* selectedActivate = nullptr;
+    std::vector<std::string> availableDeviceNames;
+    Status status =
+        selectVideoDeviceActivate(config.videoDeviceId, &selectedActivate, &outState->selectedDeviceName, &availableDeviceNames);
+    if (!status.ok()) {
+        MFShutdown();
+        return status;
+    }
+
+    status = initializeVideoSourceReader(selectedActivate, config, outState);
+    safeRelease(&selectedActivate);
+    if (!status.ok()) {
+        MFShutdown();
+        return status;
     }
 
     return Status::Ok();
@@ -1119,11 +1147,17 @@ Status tryGetAudioDeviceFriendlyName(IMMDevice* device, std::string* outName) {
     return Status::Ok();
 }
 
-Status createAudioClientForMicrophone(const media::LiveDeviceCaptureConfig& config,
-                                      AudioCaptureThreadState* outState) {
-    if (outState == nullptr) {
-        return Status::InvalidArgument("outState is null");
+Status selectAudioDevice(const std::string& requestedDeviceId,
+                         IMMDevice** outDevice,
+                         std::string* outSelectedDeviceName,
+                         std::vector<std::string>* outAvailableNames) {
+    if (outDevice == nullptr || outSelectedDeviceName == nullptr || outAvailableNames == nullptr) {
+        return Status::InvalidArgument("audio device selection outputs are null");
     }
+
+    *outDevice = nullptr;
+    outSelectedDeviceName->clear();
+    outAvailableNames->clear();
 
     IMMDeviceEnumerator* enumerator = nullptr;
     const HRESULT enumHr =
@@ -1136,72 +1170,101 @@ Status createAudioClientForMicrophone(const media::LiveDeviceCaptureConfig& conf
         return hresultStatus("CoCreateInstance(MMDeviceEnumerator)", enumHr);
     }
 
-    if (config.audioDeviceId == "default") {
-        const HRESULT defaultHr = enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &outState->device);
+    IMMDeviceCollection* collection = nullptr;
+    const HRESULT collectionHr = enumerator->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE, &collection);
+    if (FAILED(collectionHr)) {
         safeRelease(&enumerator);
+        return hresultStatus("IMMDeviceEnumerator::EnumAudioEndpoints", collectionHr);
+    }
+
+    UINT count = 0;
+    const HRESULT countHr = collection->GetCount(&count);
+    if (FAILED(countHr)) {
+        safeRelease(&collection);
+        safeRelease(&enumerator);
+        return hresultStatus("IMMDeviceCollection::GetCount", countHr);
+    }
+
+    IMMDevice* defaultDevice = nullptr;
+    if (requestedDeviceId == "default") {
+        const HRESULT defaultHr = enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &defaultDevice);
         if (FAILED(defaultHr)) {
+            safeRelease(&collection);
+            safeRelease(&enumerator);
             return hresultStatus("IMMDeviceEnumerator::GetDefaultAudioEndpoint", defaultHr);
         }
-        const Status friendlyNameStatus = tryGetAudioDeviceFriendlyName(outState->device, &outState->selectedDeviceName);
-        if (!friendlyNameStatus.ok()) {
-            outState->selectedDeviceName.clear();
-        }
-    } else {
-        IMMDeviceCollection* collection = nullptr;
-        const HRESULT collectionHr = enumerator->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE, &collection);
-        safeRelease(&enumerator);
-        if (FAILED(collectionHr)) {
-            return hresultStatus("IMMDeviceEnumerator::EnumAudioEndpoints", collectionHr);
-        }
+    }
 
-        UINT count = 0;
-        const HRESULT countHr = collection->GetCount(&count);
-        if (FAILED(countHr)) {
-            safeRelease(&collection);
-            return hresultStatus("IMMDeviceCollection::GetCount", countHr);
+    for (UINT i = 0; i < count; ++i) {
+        IMMDevice* device = nullptr;
+        IPropertyStore* propertyStore = nullptr;
+        PROPVARIANT friendlyName;
+        PropVariantInit(&friendlyName);
+
+        const HRESULT itemHr = collection->Item(i, &device);
+        if (FAILED(itemHr)) {
+            continue;
         }
 
-        std::vector<std::string> offeredNames;
-        for (UINT i = 0; i < count; ++i) {
-            IMMDevice* device = nullptr;
-            IPropertyStore* propertyStore = nullptr;
-            PROPVARIANT friendlyName;
-            PropVariantInit(&friendlyName);
-
-            const HRESULT itemHr = collection->Item(i, &device);
-            if (FAILED(itemHr)) {
-                continue;
-            }
-
-            const HRESULT storeHr = device->OpenPropertyStore(STGM_READ, &propertyStore);
-            if (FAILED(storeHr)) {
-                safeRelease(&device);
-                continue;
-            }
-
+        const HRESULT storeHr = device->OpenPropertyStore(STGM_READ, &propertyStore);
+        if (SUCCEEDED(storeHr)) {
             const HRESULT valueHr = propertyStore->GetValue(PKEY_Device_FriendlyName, &friendlyName);
             if (SUCCEEDED(valueHr) && friendlyName.vt == VT_LPWSTR && friendlyName.pwszVal != nullptr) {
                 const std::wstring wideName(friendlyName.pwszVal);
                 const std::string utf8Name = wideToUtf8(wideName);
-                offeredNames.push_back(utf8Name);
-                if (outState->device == nullptr && matchesRequestedDeviceName(config.audioDeviceId, wideName)) {
-                    outState->device = device;
-                    outState->device->AddRef();
-                    outState->selectedDeviceName = utf8Name;
+                outAvailableNames->push_back(utf8Name);
+                if (*outDevice == nullptr &&
+                    ((requestedDeviceId == "default" && defaultDevice != nullptr && device == defaultDevice) ||
+                     matchesRequestedDeviceName(requestedDeviceId, wideName))) {
+                    *outDevice = device;
+                    (*outDevice)->AddRef();
+                    *outSelectedDeviceName = utf8Name;
                 }
             }
-
-            PropVariantClear(&friendlyName);
-            safeRelease(&propertyStore);
-            safeRelease(&device);
         }
 
-        safeRelease(&collection);
+        PropVariantClear(&friendlyName);
+        safeRelease(&propertyStore);
+        safeRelease(&device);
+    }
 
-        if (outState->device == nullptr) {
-            return Status::InvalidArgument("microphone device not found for WASAPI: requested=\"" +
-                                           config.audioDeviceId + "\" offered=" + joinQuotedStrings(offeredNames));
+    if (*outDevice == nullptr && requestedDeviceId == "default" && defaultDevice != nullptr) {
+        *outDevice = defaultDevice;
+        (*outDevice)->AddRef();
+        Status friendlyNameStatus = tryGetAudioDeviceFriendlyName(*outDevice, outSelectedDeviceName);
+        if (!friendlyNameStatus.ok()) {
+            outSelectedDeviceName->clear();
         }
+    }
+
+    safeRelease(&defaultDevice);
+    safeRelease(&collection);
+    safeRelease(&enumerator);
+
+    if (requestedDeviceId.empty()) {
+        return Status::Ok();
+    }
+
+    if (*outDevice == nullptr) {
+        return Status::InvalidArgument("microphone device not found for WASAPI: requested=\"" + requestedDeviceId +
+                                       "\" offered=" + joinQuotedStrings(*outAvailableNames));
+    }
+
+    return Status::Ok();
+}
+
+Status initializeAudioClientForMicrophone(const media::LiveDeviceCaptureConfig& config,
+                                          bool startCapture,
+                                          AudioCaptureThreadState* outState) {
+    if (outState == nullptr) {
+        return Status::InvalidArgument("outState is null");
+    }
+
+    std::vector<std::string> availableDeviceNames;
+    Status status =
+        selectAudioDevice(config.audioDeviceId, &outState->device, &outState->selectedDeviceName, &availableDeviceNames);
+    if (!status.ok()) {
+        return status;
     }
 
     const HRESULT activateHr = outState->device->Activate(__uuidof(IAudioClient),
@@ -1240,12 +1303,19 @@ Status createAudioClientForMicrophone(const media::LiveDeviceCaptureConfig& conf
         return hresultStatus("IAudioClient::GetService(IAudioCaptureClient)", serviceHr);
     }
 
-    const HRESULT startHr = outState->audioClient->Start();
-    if (FAILED(startHr)) {
-        return hresultStatus("IAudioClient::Start", startHr);
+    if (startCapture) {
+        const HRESULT startHr = outState->audioClient->Start();
+        if (FAILED(startHr)) {
+            return hresultStatus("IAudioClient::Start", startHr);
+        }
     }
 
     return Status::Ok();
+}
+
+Status createAudioClientForMicrophone(const media::LiveDeviceCaptureConfig& config,
+                                      AudioCaptureThreadState* outState) {
+    return initializeAudioClientForMicrophone(config, true, outState);
 }
 
 #endif  // defined(_WIN32)
@@ -1485,6 +1555,103 @@ void audioCaptureThreadMain(media::LiveDeviceCaptureConfig config, LiveDeviceCon
 
 }  // namespace
 
+Status loadLiveDeviceCaptureConfig(const std::string& configPath, media::LiveDeviceCaptureConfig* outConfig) {
+    if (configPath.empty()) {
+        return Status::InvalidArgument("configPath is empty");
+    }
+    return loadLiveDeviceConfig(configPath, outConfig);
+}
+
+Status probeLiveDeviceCaptureConfig(const media::LiveDeviceCaptureConfig& config, LiveDeviceProbeResult* outProbe) {
+    if (outProbe == nullptr) {
+        return Status::InvalidArgument("outProbe is null");
+    }
+    if (config.videoDeviceId.empty()) {
+        return Status::InvalidArgument("probe requires videoDeviceId");
+    }
+    if (config.width <= 0 || config.height <= 0 || config.fps <= 0) {
+        return Status::InvalidArgument("probe requires positive width, height, and fps");
+    }
+
+    *outProbe = LiveDeviceProbeResult{};
+
+#if !defined(_WIN32)
+    return Status::NotImplemented("Media Foundation / WASAPI live capture is only implemented on Windows");
+#else
+    ScopedComApartment apartment;
+    if (FAILED(apartment.hr)) {
+        return hresultStatus("CoInitializeEx(probe thread)", apartment.hr);
+    }
+
+    std::vector<std::string> availableVideoDeviceNames;
+    std::string selectedVideoDeviceName;
+    int negotiatedVideoWidth = 0;
+    int negotiatedVideoHeight = 0;
+    int negotiatedVideoFps = 0;
+
+    {
+        VideoCaptureThreadState videoState;
+        Status status = createSourceReaderForCamera(config, &videoState);
+        if (!status.ok()) {
+            return status;
+        }
+
+        IMFActivate* selectedActivate = nullptr;
+        status = selectVideoDeviceActivate(
+            config.videoDeviceId, &selectedActivate, &selectedVideoDeviceName, &availableVideoDeviceNames);
+        safeRelease(&selectedActivate);
+        if (!status.ok()) {
+            MFShutdown();
+            return status;
+        }
+
+        negotiatedVideoWidth = static_cast<int>(videoState.selection.width);
+        negotiatedVideoHeight = static_cast<int>(videoState.selection.height);
+        negotiatedVideoFps = videoState.selection.fps > 0 ? videoState.selection.fps : config.fps;
+    }
+    MFShutdown();
+
+    outProbe->availableVideoDeviceNames = std::move(availableVideoDeviceNames);
+    outProbe->selectedVideoDeviceName =
+        !selectedVideoDeviceName.empty() ? std::move(selectedVideoDeviceName) : config.videoDeviceId;
+    outProbe->negotiatedVideoWidth = negotiatedVideoWidth;
+    outProbe->negotiatedVideoHeight = negotiatedVideoHeight;
+    outProbe->negotiatedVideoFps = negotiatedVideoFps;
+
+    {
+        IMMDevice* selectedDevice = nullptr;
+        std::string selectedAudioDeviceName;
+        std::vector<std::string> availableAudioDeviceNames;
+        Status status =
+            selectAudioDevice(config.audioDeviceId, &selectedDevice, &selectedAudioDeviceName, &availableAudioDeviceNames);
+        safeRelease(&selectedDevice);
+        if (!status.ok()) {
+            return status;
+        }
+
+        outProbe->availableAudioDeviceNames = std::move(availableAudioDeviceNames);
+        outProbe->selectedAudioDeviceName = std::move(selectedAudioDeviceName);
+    }
+
+    if (!config.audioDeviceId.empty()) {
+        AudioCaptureThreadState audioState;
+        Status status = initializeAudioClientForMicrophone(config, false, &audioState);
+        if (!status.ok()) {
+            return status;
+        }
+
+        outProbe->selectedAudioDeviceName =
+            !outProbe->selectedAudioDeviceName.empty() ? outProbe->selectedAudioDeviceName : config.audioDeviceId;
+        outProbe->negotiatedSampleRate =
+            audioState.formatInfo.sampleRate > 0 ? audioState.formatInfo.sampleRate : config.sampleRate;
+        outProbe->negotiatedChannels =
+            audioState.formatInfo.channels > 0 ? audioState.formatInfo.channels : config.channels;
+    }
+
+    return Status::Ok();
+#endif
+}
+
 LiveDeviceCaptureSource::LiveDeviceCaptureSource() = default;
 
 LiveDeviceCaptureSource::~LiveDeviceCaptureSource() = default;
@@ -1495,12 +1662,26 @@ Status LiveDeviceCaptureSource::configureDeviceSource(const std::string& configP
     }
 
     media::LiveDeviceCaptureConfig parsedConfig;
-    Status status = loadLiveDeviceConfig(configPath, &parsedConfig);
+    Status status = loadLiveDeviceCaptureConfig(configPath, &parsedConfig);
     if (!status.ok()) {
         return status;
     }
 
-    config_ = std::move(parsedConfig);
+    return configureDeviceSource(parsedConfig);
+}
+
+Status LiveDeviceCaptureSource::configureDeviceSource(const media::LiveDeviceCaptureConfig& config) {
+    if (config.videoDeviceId.empty()) {
+        return Status::InvalidArgument("videoDeviceId is empty");
+    }
+    if (config.width <= 0 || config.height <= 0 || config.fps <= 0) {
+        return Status::InvalidArgument("live device source requires positive width, height, and fps");
+    }
+    if (!config.audioDeviceId.empty() && (config.sampleRate <= 0 || config.channels <= 0)) {
+        return Status::InvalidArgument("live device source requires positive sampleRate and channels when audio is enabled");
+    }
+
+    config_ = config;
     started_ = false;
     context_.reset();
     return Status::Ok();
@@ -1612,6 +1793,15 @@ void LiveDeviceCaptureSource::stop() noexcept {
 
     context_.reset();
     started_ = false;
+}
+
+int LiveDeviceCaptureSource::pendingEventCount() const noexcept {
+    if (context_ == nullptr) {
+        return 0;
+    }
+
+    std::lock_guard<std::mutex> lock(context_->mutex);
+    return static_cast<int>(context_->events.size());
 }
 
 }  // namespace live_studio::capture

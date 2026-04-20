@@ -6,6 +6,15 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+set(LIVE_STUDIO_QT_ROOT "D:/itffmpeg/Qt/6.10.2/llvm-mingw_64" CACHE PATH
+    "Qt 6 root used for the Widgets publish panel")
+set(_live_studio_default_build_qt_panel ON)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND LIVE_STUDIO_QT_ROOT MATCHES "llvm-mingw")
+    set(_live_studio_default_build_qt_panel OFF)
+endif()
+option(LIVE_STUDIO_BUILD_QT_PANEL "Build the minimal Qt Widgets publish panel"
+       ${_live_studio_default_build_qt_panel})
+
 set(LIVE_STUDIO_SPDLOG_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/third_party/spdlog/include")
 if(NOT EXISTS "${LIVE_STUDIO_SPDLOG_INCLUDE_DIR}/spdlog/spdlog.h")
     message(FATAL_ERROR "vendored spdlog not found at ${LIVE_STUDIO_SPDLOG_INCLUDE_DIR}")
@@ -58,4 +67,71 @@ live_studio_import_shared_library(
 
 message(STATUS "duanshipin-live-studio FFmpeg root: ${LIVE_STUDIO_FFMPEG_ROOT}")
 
+add_library(live_studio_core
+    src/capture/LiveDeviceCaptureSource.cpp
+    src/encode/AudioEncoder.cpp
+    src/encode/VideoEncoder.cpp
+    src/publish/RtmpPublisher.cpp
+    src/session/LiveSessionController.cpp
+)
+
+target_include_directories(live_studio_core
+    PUBLIC
+        ${CMAKE_SOURCE_DIR}/src
+    PRIVATE
+        ${LIVE_STUDIO_SPDLOG_INCLUDE_DIR}
+        ${LIVE_STUDIO_FFMPEG_INCLUDE_DIR}
+)
+
+target_link_libraries(live_studio_core
+    PUBLIC
+        FFmpeg::avcodec
+        FFmpeg::avutil
+        FFmpeg::swresample
+        FFmpeg::swscale
+)
+
+if(WIN32)
+    target_link_libraries(live_studio_core
+        PUBLIC
+            avrt
+            ksuser
+            mf
+            mfplat
+            mfreadwrite
+            mfuuid
+            mmdevapi
+            ole32
+            uuid
+            ws2_32
+    )
+endif()
+
 add_subdirectory(apps/stage1_video_trace)
+
+if(LIVE_STUDIO_BUILD_QT_PANEL)
+    if(EXISTS "${LIVE_STUDIO_QT_ROOT}/lib/cmake/Qt6/Qt6Config.cmake")
+        list(PREPEND CMAKE_PREFIX_PATH "${LIVE_STUDIO_QT_ROOT}")
+    endif()
+
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND LIVE_STUDIO_QT_ROOT MATCHES "llvm-mingw")
+        message(WARNING
+            "LIVE_STUDIO_QT_ROOT points to an llvm-mingw Qt package. "
+            "If the Qt panel build fails under GCC, configure a separate build directory with "
+            "D:/itffmpeg/Qt/Tools/llvm-mingw1706_64/bin/clang++.exe and clang.exe.")
+    endif()
+
+    find_package(Qt6 COMPONENTS Core Gui Widgets Concurrent QUIET)
+    if(Qt6_FOUND)
+        add_subdirectory(apps/live_studio_panel)
+    else()
+        message(WARNING
+            "Qt6 was not found; live_studio_panel will be skipped. "
+            "Set LIVE_STUDIO_QT_ROOT or CMAKE_PREFIX_PATH to a valid Qt 6 installation.")
+    endif()
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND LIVE_STUDIO_QT_ROOT MATCHES "llvm-mingw")
+    message(STATUS
+        "Skipping live_studio_panel by default for GCC builds because LIVE_STUDIO_QT_ROOT points to "
+        "an llvm-mingw Qt package. Use a separate clang/llvm-mingw build directory or set "
+        "LIVE_STUDIO_BUILD_QT_PANEL=ON to override.")
+endif()

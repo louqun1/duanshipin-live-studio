@@ -9,4 +9,4 @@ height=480
 fps=30
 sample_rate=48000
 channels=2
-frame_count=300
+frame_count=1000

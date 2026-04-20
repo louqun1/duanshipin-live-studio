@@ -63,6 +63,38 @@ Override RTMP URL, capture profile, or target video-frame count:
 
 If the second argument is a plain integer, the app treats it as a `frame_count` override and still uses the default live capture profile.
 
+## Minimal Qt publish panel
+
+The repo now includes a thin Qt Widgets panel target:
+
+`live_studio_panel`
+
+Current UI scope:
+
+- RTMP URL input
+- video-device dropdown
+- audio-device dropdown
+- resolution / fps / sample-rate selectors
+- start / stop publish buttons
+- local preview surface
+- log window
+- live status bar with `idle / starting / publishing / stopping / failed`, video fps, audio packet rate, publish duration, first-packet latency, and latest error
+
+Because the available Qt package is `llvm-mingw`, the existing GCC `build/` directory skips this target by default. Use a dedicated Qt build directory with the matching clang toolchain:
+
+```powershell
+cmake -S . -B build-qt -G "MinGW Makefiles" `
+  -D CMAKE_BUILD_TYPE=Debug `
+  -D CMAKE_C_COMPILER=D:/itffmpeg/Qt/Tools/llvm-mingw1706_64/bin/clang.exe `
+  -D CMAKE_CXX_COMPILER=D:/itffmpeg/Qt/Tools/llvm-mingw1706_64/bin/clang++.exe `
+  -D LIVE_STUDIO_QT_ROOT=D:/itffmpeg/Qt/6.10.2/llvm-mingw_64
+
+cmake --build build-qt --target live_studio_panel
+.\build-qt\apps\live_studio_panel\live_studio_panel.exe
+```
+
+`windeployqt` is run as a post-build step for `live_studio_panel`, so the deployed executable directory is directly runnable after the build finishes.
+
 ## Verification status
 
 Verified on the current workstation:
