@@ -73,6 +73,9 @@ add_library(live_studio_core
     src/encode/VideoEncoder.cpp
     src/publish/RtmpPublisher.cpp
     src/session/LiveSessionController.cpp
+    src/session/LiveSessionControllerPipeline.cpp
+    src/session/LiveSessionControllerPublish.cpp
+    src/session/LiveSessionControllerWorker.cpp
 )
 
 target_include_directories(live_studio_core

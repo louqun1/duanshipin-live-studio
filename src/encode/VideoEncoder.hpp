@@ -9,6 +9,13 @@
 
 namespace live_studio::encode {
 
+struct VideoEncodeTrace {
+    double frameCopyDurationMs = 0.0;
+    double sendFrameDurationMs = 0.0;
+    double receivePacketDurationMs = 0.0;
+    double packetFinalizeDurationMs = 0.0;
+};
+
 class VideoEncoder {
 public:
     VideoEncoder();
@@ -23,10 +30,14 @@ public:
 
     Status configureH264(int width, int height, int fps, int bitrate);
     Status buildSequenceHeader(media::H264ParameterSets* outSets) const;
-    Status encodeFrame(const media::VideoFrame& frame, media::EncodedVideoAccessUnit* outUnit);
+    Status encodeFrame(const media::VideoFrame& frame,
+                       media::EncodedVideoAccessUnit* outUnit,
+                       VideoEncodeTrace* outTrace = nullptr);
 
-    Status encodeTraceFrame(const media::VideoFrame& frame, media::EncodedVideoAccessUnit* outUnit) {
-        return encodeFrame(frame, outUnit);
+    Status encodeTraceFrame(const media::VideoFrame& frame,
+                            media::EncodedVideoAccessUnit* outUnit,
+                            VideoEncodeTrace* outTrace = nullptr) {
+        return encodeFrame(frame, outUnit, outTrace);
     }
 
     Status pushRawFrame(std::int64_t ptsMs);

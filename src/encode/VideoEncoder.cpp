@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -12,9 +13,13 @@ extern "C" {
 #include <libavutil/avutil.h>
 #include <libavutil/dict.h>
 #include <libavutil/frame.h>
+#include <libavutil/mem.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/rational.h>
 }
+
+#include "spdlog/spdlog.h"
 
 namespace live_studio::encode {
 namespace {
@@ -23,6 +28,52 @@ std::string ffmpegErrorString(int errorCode) {
     std::array<char, AV_ERROR_MAX_STRING_SIZE> buffer{};
     av_strerror(errorCode, buffer.data(), buffer.size());
     return std::string(buffer.data());
+}
+
+std::int64_t steadyClockNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+double nsToMs(std::int64_t valueNs) {
+    return static_cast<double>(valueNs) / 1000000.0;
+}
+
+std::string formatRational(AVRational value) {
+    return std::to_string(value.num) + "/" + std::to_string(value.den);
+}
+
+std::string describePixelFormat(AVPixelFormat pixelFormat) {
+    const char* pixelFormatName = av_get_pix_fmt_name(pixelFormat);
+    if (pixelFormatName != nullptr) {
+        return std::string(pixelFormatName);
+    }
+    return "pix_fmt#" + std::to_string(static_cast<int>(pixelFormat));
+}
+
+std::string describeH264ProfileName(int profile) {
+    const char* profileName = avcodec_profile_name(AV_CODEC_ID_H264, profile);
+    if (profileName != nullptr) {
+        return std::string(profileName);
+    }
+    return profile == FF_PROFILE_UNKNOWN ? "unknown" : std::to_string(profile);
+}
+
+std::string readCodecOption(void* optionOwner, const char* optionName) {
+    if (optionOwner == nullptr || optionName == nullptr) {
+        return "n/a";
+    }
+
+    std::uint8_t* rawValue = nullptr;
+    const int result = av_opt_get(optionOwner, optionName, 0, &rawValue);
+    if (result < 0 || rawValue == nullptr) {
+        return "n/a";
+    }
+
+    std::string value(reinterpret_cast<const char*>(rawValue));
+    av_free(rawValue);
+    return value;
 }
 
 bool startsWithStartCode(const std::uint8_t* data, std::size_t size, std::size_t offset, std::size_t* codeSize) {
@@ -347,7 +398,7 @@ Status VideoEncoder::configureH264(int width, int height, int fps, int bitrate) 
     nextContext->codecContext->pix_fmt = AV_PIX_FMT_YUV420P;
     nextContext->codecContext->time_base = AVRational{1, fps};
     nextContext->codecContext->framerate = AVRational{fps, 1};
-    nextContext->codecContext->thread_count = 1;
+    nextContext->codecContext->thread_count = 4;
     nextContext->codecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
     AVDictionary* options = nullptr;
@@ -360,6 +411,36 @@ Status VideoEncoder::configureH264(int width, int height, int fps, int bitrate) 
     if (openResult < 0) {
         return Status::InternalError("avcodec_open2(H.264) failed: " + ffmpegErrorString(openResult));
     }
+
+    spdlog::info(
+        "[video-encoder-config] requested={}x{}@{} bitrate={} codec={} actualCodec={} actual={}x{} pix_fmt={} "
+        "bitrate={} gop={} maxBFrames={} hasBFrames={} refs={} threadCount={} threadType={} delay={} "
+        "globalHeader={} timeBase={} framerate={} profile={} level={} preset={} tune={} profileOpt={}",
+        width,
+        height,
+        fps,
+        bitrate,
+        nextContext->codec != nullptr ? nextContext->codec->name : "unknown",
+        nextContext->codecContext->codec != nullptr ? nextContext->codecContext->codec->name : "unknown",
+        nextContext->codecContext->width,
+        nextContext->codecContext->height,
+        describePixelFormat(nextContext->codecContext->pix_fmt),
+        static_cast<long long>(nextContext->codecContext->bit_rate),
+        nextContext->codecContext->gop_size,
+        nextContext->codecContext->max_b_frames,
+        nextContext->codecContext->has_b_frames,
+        nextContext->codecContext->refs,
+        nextContext->codecContext->thread_count,
+        nextContext->codecContext->thread_type,
+        nextContext->codecContext->delay,
+        (nextContext->codecContext->flags & AV_CODEC_FLAG_GLOBAL_HEADER) != 0 ? 1 : 0,
+        formatRational(nextContext->codecContext->time_base),
+        formatRational(nextContext->codecContext->framerate),
+        describeH264ProfileName(nextContext->codecContext->profile),
+        nextContext->codecContext->level,
+        readCodecOption(nextContext->codecContext->priv_data, "preset"),
+        readCodecOption(nextContext->codecContext->priv_data, "tune"),
+        readCodecOption(nextContext->codecContext->priv_data, "profile"));
 
     nextContext->frame = av_frame_alloc();
     if (nextContext->frame == nullptr) {
@@ -428,7 +509,9 @@ Status VideoEncoder::buildSequenceHeader(media::H264ParameterSets* outSets) cons
     return Status::Ok();
 }
 
-Status VideoEncoder::encodeFrame(const media::VideoFrame& frame, media::EncodedVideoAccessUnit* outUnit) {
+Status VideoEncoder::encodeFrame(const media::VideoFrame& frame,
+                                 media::EncodedVideoAccessUnit* outUnit,
+                                 VideoEncodeTrace* outTrace) {
     if (outUnit == nullptr) {
         return Status::InvalidArgument("outUnit is null");
     }
@@ -440,20 +523,39 @@ Status VideoEncoder::encodeFrame(const media::VideoFrame& frame, media::EncodedV
         return Status::InvalidArgument("input frame does not match encoder configuration");
     }
 
+    if (outTrace != nullptr) {
+        *outTrace = VideoEncodeTrace{};
+    }
+
+    const std::int64_t copyStartNs = steadyClockNowNs();
     Status copyStatus = copyVideoFrameToAvFrame(frame, context_->frame);
     if (!copyStatus.ok()) {
         return copyStatus;
+    }
+    const std::int64_t copyDoneNs = steadyClockNowNs();
+    if (outTrace != nullptr) {
+        outTrace->frameCopyDurationMs = nsToMs(copyDoneNs - copyStartNs);
     }
 
     context_->frame->pts = av_rescale_q(frame.ptsMs, AVRational{1, 1000}, context_->codecContext->time_base);
     av_packet_unref(context_->packet);
 
+    const std::int64_t sendStartNs = steadyClockNowNs();
     const int sendResult = avcodec_send_frame(context_->codecContext, context_->frame);
+    const std::int64_t sendDoneNs = steadyClockNowNs();
+    if (outTrace != nullptr) {
+        outTrace->sendFrameDurationMs = nsToMs(sendDoneNs - sendStartNs);
+    }
     if (sendResult < 0) {
         return Status::InternalError("avcodec_send_frame failed: " + ffmpegErrorString(sendResult));
     }
 
+    const std::int64_t receiveStartNs = steadyClockNowNs();
     const int receiveResult = avcodec_receive_packet(context_->codecContext, context_->packet);
+    const std::int64_t receiveDoneNs = steadyClockNowNs();
+    if (outTrace != nullptr) {
+        outTrace->receivePacketDurationMs = nsToMs(receiveDoneNs - receiveStartNs);
+    }
     if (receiveResult == AVERROR(EAGAIN)) {
         return Status::InternalError("H.264 encoder produced no packet for the submitted frame");
     }
@@ -476,12 +578,17 @@ Status VideoEncoder::encodeFrame(const media::VideoFrame& frame, media::EncodedV
             : av_rescale_q(context_->packet->dts, context_->codecContext->time_base, AVRational{1, 1000});
     outUnit->codec = "h264";
 
+    const std::int64_t packetFinalizeStartNs = steadyClockNowNs();
     Status payloadStatus = convertPacketToAnnexB(context_->packet, context_->nalLengthSize, &outUnit->annexBPayload);
     if (!payloadStatus.ok()) {
         av_packet_unref(context_->packet);
         return payloadStatus;
     }
     outUnit->nalSummary = summarizeAccessUnitPayload(outUnit->annexBPayload, outUnit->keyFrame);
+    const std::int64_t packetFinalizeDoneNs = steadyClockNowNs();
+    if (outTrace != nullptr) {
+        outTrace->packetFinalizeDurationMs = nsToMs(packetFinalizeDoneNs - packetFinalizeStartNs);
+    }
 
     av_packet_unref(context_->packet);
     return Status::Ok();
