@@ -64,12 +64,21 @@ void workerMain(LiveSessionController::ControllerState* state) {
                         VideoEncodeInput input;
                         input.frame = std::move(event.videoFrame);
                         input.pendingCaptureEvents = pendingEvents;
-                        input.videoQueueDepthAfterPush = activeSession->videoInputQueue.size() + 1;
+                        input.videoQueueDepthAfterPush = std::min(activeSession->videoInputQueue.size() + 1,
+                                                                  activeSession->videoInputQueue.capacity());
                         input.senderQueueDepthSnapshot = senderQueueDepthSnapshot;
                         input.droppedVideoFrames = activeSession->droppedVideoFrames.load();
                         input.enqueuedAtNs = steadyClockNowNs();
                         videoPerfSampleNs = input.enqueuedAtNs;
-                        activeSession->videoInputQueue.pushUnbounded(std::move(input), &videoQueueDepthAfterPush);
+
+                        bool droppedFrame = false;
+                        const bool queued = activeSession->videoInputQueue.pushDropOldest(
+                            std::move(input), &droppedFrame, &videoQueueDepthAfterPush);
+                        if (!queued) {
+                            dispatchStatus = Status::InternalError("video input queue rejected frame");
+                        } else if (droppedFrame) {
+                            activeSession->droppedVideoFrames.fetch_add(1);
+                        }
                     }
                 }
             }

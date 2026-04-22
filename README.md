@@ -133,6 +133,12 @@ Verified on the current workstation:
   - RTMP transport for stage-1 publish
 - `docs/stage.md`
   - stage document for the current runnable chain
+- `docs/guest_link_mic_plan.md`
+  - backup staged implementation document for the `LiveKit + SRS` route
+- `docs/guest_link_mic_plan_libdatachannel.md`
+  - current staged implementation document for the centered `libdatachannel + coturn + SRS` route
+- `docs/guest_link_mic_stage0_checklist.md`
+  - executable stage-0 checklist for the current libdatachannel-based route
 
 ## Next step
 

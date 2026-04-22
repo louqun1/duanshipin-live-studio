@@ -398,7 +398,7 @@ Status VideoEncoder::configureH264(int width, int height, int fps, int bitrate) 
     nextContext->codecContext->pix_fmt = AV_PIX_FMT_YUV420P;
     nextContext->codecContext->time_base = AVRational{1, fps};
     nextContext->codecContext->framerate = AVRational{fps, 1};
-    nextContext->codecContext->thread_count = 4;
+    nextContext->codecContext->thread_count = 6;
     nextContext->codecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
     AVDictionary* options = nullptr;
