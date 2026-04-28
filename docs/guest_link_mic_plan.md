@@ -129,7 +129,7 @@
 
 - RTC 服务：`LiveKit`
 - 观众分发：`SRS`
-- 业务服务：自建 `HTTP + WebSocket + LiveKit token 下发`
+- 业务服务：部署在虚拟机上的 Go `HTTP + WebSocket + LiveKit token 下发`
 - 嘉宾端：网页 H5 + `LiveKit` 前端 SDK
 - 主播端：当前本地导播程序 + `LiveKit C++ SDK`
 
@@ -185,7 +185,7 @@
 
 ## 7. 业务信令边界
 
-连麦业务服务建议放在 `server/` 对应的后端工程里，职责边界如下：
+连麦业务服务建议继续放在现有平台后端工程 `../duanshipin-pingtai/server` 中，由部署在虚拟机上的 Go 服务承担。当前仓库的 `server/` 目录只保留说明和协议约定。职责边界如下：
 
 - 开播鉴权
 - 直播间创建与状态维护

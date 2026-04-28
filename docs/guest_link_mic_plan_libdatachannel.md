@@ -3,7 +3,7 @@
 当前选定路线：
 
 - 当前仓库后续连麦实现，优先按本文档推进
-- 当前默认架构是 `主主播中心汇聚 RTC + libdatachannel + 自建 SDP/ICE 信令 + coturn + SRS`
+- 当前默认架构是 `主主播中心汇聚 RTC + libdatachannel + 部署在 VM 的 Go SDP/ICE 信令 + coturn + SRS`
 - [guest_link_mic_plan.md](D:/itffmpeg/av_media/online/duanshipin-live-studio/docs/guest_link_mic_plan.md:1) 保留为 `LiveKit + SRS` 备选方案，不作为当前实施主线
 
 本文档是 [guest_link_mic_plan.md](D:/itffmpeg/av_media/online/duanshipin-live-studio/docs/guest_link_mic_plan.md:1) 之外的并行方案文档，但当前已被选定为主实施路线。
@@ -12,7 +12,7 @@
 
 - 主主播端：`libdatachannel`
 - 其他上麦端：原生客户端，优先也使用 `libdatachannel`
-- 信令：自建 `WebSocket`
+- 信令：部署在虚拟机上的自建 Go `HTTP + WebSocket`
 - NAT 穿透：`coturn`
 - 观众分发：`SRS`
 
@@ -96,17 +96,17 @@
 
 ```text
 上麦客户端 A
-  -> 业务服务(HTTP + WebSocket)
+  -> VM 上的 Go 业务服务(HTTP + WebSocket)
   -> libdatachannel PeerConnection
   -> STUN/TURN(coturn)
 
 上麦客户端 B
-  -> 业务服务(HTTP + WebSocket)
+  -> VM 上的 Go 业务服务(HTTP + WebSocket)
   -> libdatachannel PeerConnection
   -> STUN/TURN(coturn)
 
 主主播导播台
-  -> 业务服务(HTTP + WebSocket)
+  -> VM 上的 Go 业务服务(HTTP + WebSocket)
   -> 与每个上麦端分别建立 libdatachannel PeerConnection
   -> STUN/TURN(coturn)
   -> 本地视频合成 / 音频混合
@@ -118,7 +118,7 @@
 这条路线的关键边界是：
 
 - 上麦互动：主主播与每个上麦端之间分别通过 `libdatachannel` 建 RTC
-- 业务控制：你自己的 `HTTP + WebSocket`
+- 业务控制：部署在虚拟机上的自有 Go `HTTP + WebSocket`
 - NAT 穿透：`coturn`
 - 观众分发：`SRS`
 
@@ -245,7 +245,7 @@
 
 ## 8. 业务信令边界
 
-业务服务建议继续放在 `server/` 对应的后端工程里，职责包括：
+业务服务建议继续放在现有平台后端工程 `../duanshipin-pingtai/server` 中，由部署在虚拟机上的 Go 服务承担，当前仓库的 `server/` 目录只保留说明和协议约定。职责包括：
 
 - 开播鉴权
 - 直播间创建与状态维护
@@ -253,6 +253,14 @@
 - 上麦申请、邀请、接受、拒绝、结束
 - 生成和转发 RTC 信令
 - 为双方下发 `STUN/TURN` 配置
+
+结合现有平台服务端现状，连麦应继续复用同一个 Go 后端的基础设施，而不是再单独维护一套本地 Node 信令服务。当前已经存在并值得复用的方向包括：
+
+- Go API 入口与环境变量配置
+- MySQL 连接与 schema 管理
+- SSE 事件推送能力
+- 现有媒体平台的鉴权、存储和业务模型
+- Redis 可选接入，用于在线状态缓存、邀请超时和多实例同步
 
 第一版最小信令事件建议包括：
 
@@ -384,6 +392,10 @@
 目标：
 
 - 不接媒体，先把房间成员列表、上麦申请、邀请、接受、拒绝跑通
+
+当前仓库里的阶段 1 探针联调说明见：
+
+- [guest_link_mic_stage1_signal_probe.md](D:/itffmpeg/av_media/online/duanshipin-live-studio/docs/guest_link_mic_stage1_signal_probe.md:1)
 
 只做：
 

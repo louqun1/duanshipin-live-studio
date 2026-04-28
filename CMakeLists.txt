@@ -6,6 +6,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+list(PREPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+include(LiveStudioRtcDeps)
+
 set(LIVE_STUDIO_QT_ROOT "D:/itffmpeg/Qt/6.10.2/llvm-mingw_64" CACHE PATH
     "Qt 6 root used for the Widgets publish panel")
 set(_live_studio_default_build_qt_panel ON)
@@ -14,6 +17,11 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND LIVE_STUDIO_QT_ROOT MATCHES "llvm-mi
 endif()
 option(LIVE_STUDIO_BUILD_QT_PANEL "Build the minimal Qt Widgets publish panel"
        ${_live_studio_default_build_qt_panel})
+option(LIVE_STUDIO_BUILD_RTC_PROBES "Build the libdatachannel-based RTC probe apps" OFF)
+set(LIVE_STUDIO_LIBDATACHANNEL_INSTALL_DIR
+    "${CMAKE_SOURCE_DIR}/third_party/libdatachannel-install"
+    CACHE PATH
+    "Root directory of the installed LibDataChannel package")
 
 set(LIVE_STUDIO_SPDLOG_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/third_party/spdlog/include")
 if(NOT EXISTS "${LIVE_STUDIO_SPDLOG_INCLUDE_DIR}/spdlog/spdlog.h")
@@ -111,6 +119,12 @@ if(WIN32)
 endif()
 
 add_subdirectory(apps/stage1_video_trace)
+
+if(LIVE_STUDIO_BUILD_RTC_PROBES)
+    live_studio_require_libdatachannel()
+    add_subdirectory(apps/rtc_probe)
+    add_subdirectory(apps/rtc_guest_probe)
+endif()
 
 if(LIVE_STUDIO_BUILD_QT_PANEL)
     if(EXISTS "${LIVE_STUDIO_QT_ROOT}/lib/cmake/Qt6/Qt6Config.cmake")

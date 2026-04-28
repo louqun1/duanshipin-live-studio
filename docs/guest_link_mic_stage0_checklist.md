@@ -1,10 +1,80 @@
 # 连麦阶段 0 待办清单
 
+## 当前已落地约定
+
+- `libdatachannel` 固定版本：`v0.24.2`
+- 依赖源码目录：`third_party/libdatachannel-src`
+- 依赖构建目录：`third_party/libdatachannel-build`
+- 依赖安装目录：`third_party/libdatachannel-install`
+- 连麦业务服务继续复用现有平台后端工程：`../duanshipin-pingtai/server`
+- 连麦业务服务语言固定为：`Go`
+- 连麦业务服务部署位置固定为：虚拟机
+- 主工程通过 `find_package(LibDataChannel CONFIG REQUIRED)` 接入
+- 统一链接 target：`LibDataChannel::LibDataChannel`
+- 顶层 CMake 通过 `LIVE_STUDIO_BUILD_RTC_PROBES=ON` 控制是否构建 RTC 探针
+- 探针构建目录固定为：`build-rtc`
+- 当前仓库已新增脚本：
+- `scripts/setup_libdatachannel.ps1`
+- `scripts/configure_rtc_probes.ps1`
+- 当前仓库已新增最小探针目标：
+- `apps/rtc_probe/`
+- `apps/rtc_guest_probe/`
+
+推荐拆成两套执行顺序：
+
+首次准备版：
+
+1. 准备 OpenSSL 开发根目录，例如 `C:\Program Files\OpenSSL-Win64`
+2. 运行：`powershell -ExecutionPolicy Bypass -File .\scripts\setup_libdatachannel.ps1 -OpenSslRootDir "C:\Program Files\OpenSSL-Win64"`
+3. 运行：`powershell -ExecutionPolicy Bypass -File .\scripts\configure_rtc_probes.ps1 -Build`
+4. 确认虚拟机中的 Go 连麦业务服务已启动，并暴露 WebSocket 信令地址，例如 `ws://<vm-ip>:8080/ws`
+5. 如果本轮要验证 `STUN/TURN`，先启动 `coturn`，并准备好 `--ice-server` 参数，例如 `turn://probe:probe_turn_123@192.168.3.28:3478?transport=udp`；如果要确认真的走了 TURN relay，再额外带上 `--relay-only`；如果本轮只验证最小信令闭环，这一步可以先跳过
+6. 先运行：`.\build-rtc\apps\rtc_guest_probe\rtc_guest_probe.exe --signaling-url ws://192.168.3.28:8080/ws --room-id stage0 --ice-server turn://probe:probe_turn_123@192.168.3.28:3478?transport=udp --relay-only --timeout-ms 30000`
+7. 再运行：`.\build-rtc\apps\rtc_probe\rtc_probe.exe --signaling-url ws://192.168.3.28:8080/ws --room-id stage0 --ice-server turn://probe:probe_turn_123@192.168.3.28:3478?transport=udp --relay-only --timeout-ms 30000`
+
+当前机器日常联调版：
+
+1. 确认虚拟机中的 Go 连麦业务服务已启动，并暴露 WebSocket 信令地址，例如 `ws://<vm-ip>:8080/ws`
+2. 如果本次改过 probe 代码，再运行：`powershell -ExecutionPolicy Bypass -File .\scripts\configure_rtc_probes.ps1 -Build`
+3. 如果本轮要验证 `STUN/TURN`，先启动 `coturn`，并给两个 probe 都带上 `--ice-server`，例如 `turn://probe:probe_turn_123@<vm-ip>:3478?transport=udp`；如果你要确认真的走了 relay，再额外带上 `--relay-only`；如果本轮只验证最小信令闭环，这一步可以先跳过
+4. 先运行：`.\build-rtc\apps\rtc_guest_probe\rtc_guest_probe.exe --signaling-url ws://<vm-ip>:8080/ws --room-id stage0 --ice-server turn://probe:probe_turn_123@<vm-ip>:3478?transport=udp --relay-only --timeout-ms 30000`
+5. 再运行：`.\build-rtc\apps\rtc_probe\rtc_probe.exe --signaling-url ws://<vm-ip>:8080/ws --room-id stage0 --ice-server turn://probe:probe_turn_123@<vm-ip>:3478?transport=udp --relay-only --timeout-ms 30000`
+
+阶段 0 当前验收标准：
+
+- 两个探针都能完成 `PeerConnection` 创建
+- 证明 `libdatachannel` 的包发现、头文件、链接和基础运行时链路已打通
+- 阶段 0 当前至少要验证 probe 到虚拟机 Go 信令入口的基础联通
+
+## 阶段 0 收尾记录（截至 2026-04-28）
+
+- 当前状态：阶段 0 已收尾，可以进入阶段 1
+- 测试环境：Windows 开发机运行 `rtc_probe.exe` 与 `rtc_guest_probe.exe`，虚拟机 `192.168.3.28` 承载 Go 信令服务与 `coturn`
+- 信令健康检查：`http://192.168.3.28:8080/healthz`
+- 信令 WebSocket 地址：`ws://192.168.3.28:8080/ws`
+- TURN 地址：`turn://probe:probe_turn_123@192.168.3.28:3478?transport=udp`
+- TURN 账号方式：静态用户名密码，`username=probe`，`credential=probe_turn_123`
+- 当前已验证：最小 `WebSocket + RTC` 建连闭环打通，`--relay-only` 模式下 TURN relay 链路可用
+- 成功场景：先启动 `rtc_guest_probe.exe`，再启动 `rtc_probe.exe`，双方完成 `registered -> offer/answer -> ICE -> data channel open`，并能双向收发测试消息
+
+关键配置记录：
+
+- 开放端口：`8080/TCP` 用于 `healthz + WebSocket`，`3478/UDP` 用于 TURN；`SRS` 继续按现网 `1935/TCP` 与现有 HTTP-FLV/HLS 端口使用
+- 证书状态：阶段 0 联调走内网 `ws://` 与 `turn://`，当前未启用 `wss://` / `turns://` 证书
+- NAT / 部署方式：当前按“开发机双端客户端 + 虚拟机承载 Go 信令与 coturn”执行；公网域名、TLS 证书、浏览器兼容性不在阶段 0 验收范围内
+- 客户端接入参数：如需复现本轮收尾联调，直接使用下面这组命令
+
+```powershell
+.\build-rtc\apps\rtc_guest_probe\rtc_guest_probe.exe --signaling-url ws://192.168.3.28:8080/ws --room-id stage0 --ice-server turn://probe:probe_turn_123@192.168.3.28:3478?transport=udp --relay-only --timeout-ms 30000
+
+.\build-rtc\apps\rtc_probe\rtc_probe.exe --signaling-url ws://192.168.3.28:8080/ws --room-id stage0 --ice-server turn://probe:probe_turn_123@192.168.3.28:3478?transport=udp --relay-only --timeout-ms 30000
+```
+
 本文档对应当前主实施路线：
 
 - RTC：`libdatachannel`
 - 拓扑：主播端为中心汇聚点
-- 信令：自建 `WebSocket`，转发 `SDP / ICE`
+- 信令：部署在虚拟机上的自建 Go `WebSocket` 服务，负责转发 `SDP / ICE`
 - NAT 穿透：`coturn`
 - 观众分发：`SRS`
 
@@ -54,7 +124,7 @@
 
 1. 先冻结术语和第一版边界。
 2. 再确定依赖获取与构建策略。
-3. 再把本地联调拓扑和端口定下来。
+3. 再把联调拓扑和端口定下来。
 4. 再冻结最小信令消息。
 5. 再定义两个 probe 程序的责任边界。
 6. 最后做阶段 0 验收。
@@ -200,21 +270,22 @@
 
 - 能在当前机器上稳定生成两个 probe 的可执行文件
 
-## 任务 4：冻结本地联调拓扑
+## 任务 4：冻结联调拓扑
 
 目标：
 
 - 把本地网络拓扑和服务依赖写清楚
+- 把“开发机客户端 + 虚拟机 Go 服务端”的职责边界写清楚
 
-建议的本地联调拓扑：
+建议的联调拓扑：
 
 ```text
 rtc_probe.exe
-  <-> signaling server (WebSocket)
+  <-> VM Go signaling service (WebSocket)
   <-> coturn
 
 rtc_guest_probe.exe
-  <-> signaling server (WebSocket)
+  <-> VM Go signaling service (WebSocket)
   <-> coturn
 
 主播端节目输出
@@ -224,26 +295,26 @@ rtc_guest_probe.exe
 
 必须决定的事项：
 
-- signaling server 地址
+- 虚拟机 Go 信令入口地址
 - `coturn` 地址与端口
 - `SRS` 推流地址
-- 本机测试时是否允许全都跑在同一台机器
+- probe 是否固定运行在开发机，本地是否只承担客户端职责
 
-建议冻结的本地默认端口表：
+建议冻结的联调默认地址表：
 
-- signaling：例如 `ws://127.0.0.1:18080/ws`
+- signaling：例如 `ws://<vm-ip>:8080/ws`
 - `coturn`：`3478`
 - `SRS RTMP`：`1935`
 - `SRS HTTP-FLV/HLS`：按现有环境
 
 本任务产出：
 
-- 本地联调拓扑图
+- 联调拓扑图
 - 默认端口和地址表
 
 验收标准：
 
-- 不同同事按照文档能连到同一套本地服务
+- 不同同事按照文档能连到同一套虚拟机服务
 
 ## 任务 5：冻结 coturn 使用方式
 
@@ -420,18 +491,18 @@ rtc_guest_probe.exe
 
 建议的最终验收顺序：
 
-1. 启动 signaling server。
-2. 启动 `coturn`。
-3. 启动 `rtc_probe.exe`。
-4. 启动 `rtc_guest_probe.exe`。
-5. 手工触发一次邀请或申请。
-6. 观察 `offer / answer / ICE` 是否完整流转。
-7. 观察 DataChannel 是否连通。
+1. 在虚拟机上启动 Go 连麦业务服务，并确认 `http://<vm-ip>:8080/healthz` 和 `ws://<vm-ip>:8080/ws` 可访问。
+2. 如果本轮要验证 `STUN/TURN`，先启动 `coturn`，并确定好给 probe 使用的 `--ice-server` 参数，例如 `turn://probe:probe_turn_123@<vm-ip>:3478?transport=udp`；如果你要确认真的走了 relay，再额外带上 `--relay-only`；如果本轮只验证最小信令闭环，这一步可以先跳过。
+3. 先启动 `rtc_guest_probe.exe`，例如：`.\build-rtc\apps\rtc_guest_probe\rtc_guest_probe.exe --signaling-url ws://<vm-ip>:8080/ws --room-id stage0 --ice-server turn://probe:probe_turn_123@<vm-ip>:3478?transport=udp --relay-only --timeout-ms 30000`
+4. 再启动 `rtc_probe.exe`，例如：`.\build-rtc\apps\rtc_probe\rtc_probe.exe --signaling-url ws://<vm-ip>:8080/ws --room-id stage0 --ice-server turn://probe:probe_turn_123@<vm-ip>:3478?transport=udp --relay-only --timeout-ms 30000`
+5. 如果启用了 `coturn`，观察 `offer / answer / ICE` 是否完整流转；如果没有启用 `coturn`，至少要确认最小 `WebSocket + RTC` 建连闭环已打通。
+6. 观察 DataChannel 是否连通。
 
 必须能看到的结果：
 
-- 两端都进入 `connected`
-- 两端都打印远端 candidate 到达
+- 两端都打印 `registered as ...`
+- `controller` 端打印 `creating offer for guest-probe`
+- 两端都能看到 `data channel open ...`
 - 两端都能收发一条测试消息
 
 本任务产出：
@@ -451,7 +522,7 @@ rtc_guest_probe.exe
 - 本文档  
   [guest_link_mic_stage0_checklist.md](D:/itffmpeg/av_media/online/duanshipin-live-studio/docs/guest_link_mic_stage0_checklist.md:1)
 - `libdatachannel` 接入说明
-- 本地 `coturn` 使用说明
+- `coturn` 使用说明
 - 最小信令字段表
 - probe 程序职责说明
 
@@ -468,3 +539,17 @@ rtc_guest_probe.exe
 - 阶段 0 验收步骤可重复执行
 
 如果其中任意一项还没定，就不要进入阶段 1 或阶段 2。
+
+截至 `2026-04-28`，本轮联调已满足上述完成定义，阶段 0 可以正式收尾。
+
+## 阶段 1 进入清单
+
+阶段 1 的目标不再是“证明能连通一次”，而是把当前结果提升成“可以稳定重复运行，并且出问题时能快速定位”。
+
+优先顺序建议如下：
+
+1. 先补稳定性，包括连接状态机收敛、超时处理、挂断清理、重复触发保护。
+2. 再补异常重连，包括 `WebSocket` 断开、`ICE disconnected/failed`、`coturn` 不可达、对端中途退出等场景。
+3. 再补日志观测，包括 `room_id / request_id / user_id` 贯通日志、`offer / answer / ICE` 关键节点日志、状态迁移日志。
+4. 再把当前硬编码联调参数逐步收口成配置项或服务端下发，包括 `signaling-url`、`STUN/TURN`、超时时间和房间参数。
+5. 最后再做体验和功能扩展，包括真实音视频轨道、申请/邀请流程、节目布局、混流与观众侧联动。

@@ -2,3 +2,7 @@ build/
 build-*/
 *.exe
 logs/
+third_party/libdatachannel-src/
+third_party/libdatachannel-build/
+third_party/libdatachannel-install/
+server/node_modules/
