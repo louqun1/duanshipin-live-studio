@@ -1,0 +1,8 @@
+# Default WASAPI microphone profile for rtc_probe single-direction audio send.
+# `default` picks the default capture endpoint.
+
+source_label=rtc-probe-mic
+audio_device=default
+sample_rate=48000
+channels=2
+frame_count=1000

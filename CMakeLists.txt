@@ -78,6 +78,7 @@ message(STATUS "duanshipin-live-studio FFmpeg root: ${LIVE_STUDIO_FFMPEG_ROOT}")
 add_library(live_studio_core
     src/capture/LiveDeviceCaptureSource.cpp
     src/encode/AudioEncoder.cpp
+    src/encode/OpusAudioEncoder.cpp
     src/encode/VideoEncoder.cpp
     src/publish/RtmpPublisher.cpp
     src/session/LiveSessionController.cpp

@@ -162,11 +162,11 @@ Status loadLiveDeviceConfig(const std::string& configPath, media::LiveDeviceCapt
         }
     }
 
-    if (config.videoDeviceId.empty()) {
-        return Status::InvalidArgument("capture config must define video_device");
+    if (config.videoDeviceId.empty() && config.audioDeviceId.empty()) {
+        return Status::InvalidArgument("capture config must define video_device, audio_device, or both");
     }
-    if (config.width <= 0 || config.height <= 0 || config.fps <= 0) {
-        return Status::InvalidArgument("capture config must define positive width, height, and fps");
+    if (!config.videoDeviceId.empty() && (config.width <= 0 || config.height <= 0 || config.fps <= 0)) {
+        return Status::InvalidArgument("capture config must define positive width, height, and fps when video_device is set");
     }
     if (!config.audioDeviceId.empty() && (config.sampleRate <= 0 || config.channels <= 0)) {
         return Status::InvalidArgument(
@@ -1566,11 +1566,14 @@ Status probeLiveDeviceCaptureConfig(const media::LiveDeviceCaptureConfig& config
     if (outProbe == nullptr) {
         return Status::InvalidArgument("outProbe is null");
     }
-    if (config.videoDeviceId.empty()) {
-        return Status::InvalidArgument("probe requires videoDeviceId");
+    if (config.videoDeviceId.empty() && config.audioDeviceId.empty()) {
+        return Status::InvalidArgument("probe requires at least one enabled device");
     }
-    if (config.width <= 0 || config.height <= 0 || config.fps <= 0) {
-        return Status::InvalidArgument("probe requires positive width, height, and fps");
+    if (!config.videoDeviceId.empty() && (config.width <= 0 || config.height <= 0 || config.fps <= 0)) {
+        return Status::InvalidArgument("probe requires positive width, height, and fps when video is enabled");
+    }
+    if (!config.audioDeviceId.empty() && (config.sampleRate <= 0 || config.channels <= 0)) {
+        return Status::InvalidArgument("probe requires positive sampleRate and channels when audio is enabled");
     }
 
     *outProbe = LiveDeviceProbeResult{};
@@ -1583,60 +1586,63 @@ Status probeLiveDeviceCaptureConfig(const media::LiveDeviceCaptureConfig& config
         return hresultStatus("CoInitializeEx(probe thread)", apartment.hr);
     }
 
-    std::vector<std::string> availableVideoDeviceNames;
-    std::string selectedVideoDeviceName;
-    int negotiatedVideoWidth = 0;
-    int negotiatedVideoHeight = 0;
-    int negotiatedVideoFps = 0;
+    if (!config.videoDeviceId.empty()) {
+        std::vector<std::string> availableVideoDeviceNames;
+        std::string selectedVideoDeviceName;
+        int negotiatedVideoWidth = 0;
+        int negotiatedVideoHeight = 0;
+        int negotiatedVideoFps = 0;
 
-    {
-        VideoCaptureThreadState videoState;
-        Status status = createSourceReaderForCamera(config, &videoState);
-        if (!status.ok()) {
-            return status;
+        {
+            VideoCaptureThreadState videoState;
+            Status status = createSourceReaderForCamera(config, &videoState);
+            if (!status.ok()) {
+                return status;
+            }
+
+            IMFActivate* selectedActivate = nullptr;
+            status = selectVideoDeviceActivate(
+                config.videoDeviceId, &selectedActivate, &selectedVideoDeviceName, &availableVideoDeviceNames);
+            safeRelease(&selectedActivate);
+            if (!status.ok()) {
+                MFShutdown();
+                return status;
+            }
+
+            negotiatedVideoWidth = static_cast<int>(videoState.selection.width);
+            negotiatedVideoHeight = static_cast<int>(videoState.selection.height);
+            negotiatedVideoFps = videoState.selection.fps > 0 ? videoState.selection.fps : config.fps;
         }
 
-        IMFActivate* selectedActivate = nullptr;
-        status = selectVideoDeviceActivate(
-            config.videoDeviceId, &selectedActivate, &selectedVideoDeviceName, &availableVideoDeviceNames);
-        safeRelease(&selectedActivate);
-        if (!status.ok()) {
-            MFShutdown();
-            return status;
-        }
-
-        negotiatedVideoWidth = static_cast<int>(videoState.selection.width);
-        negotiatedVideoHeight = static_cast<int>(videoState.selection.height);
-        negotiatedVideoFps = videoState.selection.fps > 0 ? videoState.selection.fps : config.fps;
-    }
-    MFShutdown();
-
-    outProbe->availableVideoDeviceNames = std::move(availableVideoDeviceNames);
-    outProbe->selectedVideoDeviceName =
-        !selectedVideoDeviceName.empty() ? std::move(selectedVideoDeviceName) : config.videoDeviceId;
-    outProbe->negotiatedVideoWidth = negotiatedVideoWidth;
-    outProbe->negotiatedVideoHeight = negotiatedVideoHeight;
-    outProbe->negotiatedVideoFps = negotiatedVideoFps;
-
-    {
-        IMMDevice* selectedDevice = nullptr;
-        std::string selectedAudioDeviceName;
-        std::vector<std::string> availableAudioDeviceNames;
-        Status status =
-            selectAudioDevice(config.audioDeviceId, &selectedDevice, &selectedAudioDeviceName, &availableAudioDeviceNames);
-        safeRelease(&selectedDevice);
-        if (!status.ok()) {
-            return status;
-        }
-
-        outProbe->availableAudioDeviceNames = std::move(availableAudioDeviceNames);
-        outProbe->selectedAudioDeviceName = std::move(selectedAudioDeviceName);
+        outProbe->availableVideoDeviceNames = std::move(availableVideoDeviceNames);
+        outProbe->selectedVideoDeviceName =
+            !selectedVideoDeviceName.empty() ? std::move(selectedVideoDeviceName) : config.videoDeviceId;
+        outProbe->negotiatedVideoWidth = negotiatedVideoWidth;
+        outProbe->negotiatedVideoHeight = negotiatedVideoHeight;
+        outProbe->negotiatedVideoFps = negotiatedVideoFps;
     }
 
     if (!config.audioDeviceId.empty()) {
+        {
+            IMMDevice* selectedDevice = nullptr;
+            std::string selectedAudioDeviceName;
+            std::vector<std::string> availableAudioDeviceNames;
+            Status status = selectAudioDevice(
+                config.audioDeviceId, &selectedDevice, &selectedAudioDeviceName, &availableAudioDeviceNames);
+            safeRelease(&selectedDevice);
+            if (!status.ok()) {
+                MFShutdown();
+                return status;
+            }
+
+            outProbe->availableAudioDeviceNames = std::move(availableAudioDeviceNames);
+            outProbe->selectedAudioDeviceName = std::move(selectedAudioDeviceName);
+        }
+
         AudioCaptureThreadState audioState;
         Status status = initializeAudioClientForMicrophone(config, false, &audioState);
         if (!status.ok()) {
+            MFShutdown();
             return status;
         }
 
@@ -1647,6 +1653,8 @@ Status probeLiveDeviceCaptureConfig(const media::LiveDeviceCaptureConfig& config
         outProbe->negotiatedChannels =
             audioState.formatInfo.channels > 0 ? audioState.formatInfo.channels : config.channels;
     }
+
+    MFShutdown();
 
     return Status::Ok();
 #endif
@@ -1671,11 +1679,11 @@ Status LiveDeviceCaptureSource::configureDeviceSource(const std::string& configP
 }
 
 Status LiveDeviceCaptureSource::configureDeviceSource(const media::LiveDeviceCaptureConfig& config) {
-    if (config.videoDeviceId.empty()) {
-        return Status::InvalidArgument("videoDeviceId is empty");
+    if (config.videoDeviceId.empty() && config.audioDeviceId.empty()) {
+        return Status::InvalidArgument("live device source requires at least one enabled device");
     }
-    if (config.width <= 0 || config.height <= 0 || config.fps <= 0) {
-        return Status::InvalidArgument("live device source requires positive width, height, and fps");
+    if (!config.videoDeviceId.empty() && (config.width <= 0 || config.height <= 0 || config.fps <= 0)) {
+        return Status::InvalidArgument("live device source requires positive width, height, and fps when video is enabled");
     }
     if (!config.audioDeviceId.empty() && (config.sampleRate <= 0 || config.channels <= 0)) {
         return Status::InvalidArgument("live device source requires positive sampleRate and channels when audio is enabled");
@@ -1688,19 +1696,29 @@ Status LiveDeviceCaptureSource::configureDeviceSource(const media::LiveDeviceCap
 }
 
 Status LiveDeviceCaptureSource::start() {
-    if (config_.videoDeviceId.empty() || config_.width <= 0 || config_.height <= 0 || config_.fps <= 0) {
+    if (config_.videoDeviceId.empty() && config_.audioDeviceId.empty()) {
         return Status::InvalidArgument("live device source is not fully configured");
+    }
+    if (!config_.videoDeviceId.empty() && (config_.width <= 0 || config_.height <= 0 || config_.fps <= 0)) {
+        return Status::InvalidArgument("live device source video settings are incomplete");
+    }
+    if (!config_.audioDeviceId.empty() && (config_.sampleRate <= 0 || config_.channels <= 0)) {
+        return Status::InvalidArgument("live device source audio settings are incomplete");
     }
 
 #if !defined(_WIN32)
     return Status::NotImplemented("Media Foundation / WASAPI live capture is only implemented on Windows");
 #else
     context_ = std::make_unique<LiveDeviceContext>();
+    context_->videoInitDone = config_.videoDeviceId.empty();
+    context_->videoThreadExited = config_.videoDeviceId.empty();
     context_->audioInitDone = config_.audioDeviceId.empty();
     context_->audioThreadExited = config_.audioDeviceId.empty();
 
     media::LiveDeviceCaptureConfig threadConfig = config_;
-    context_->videoThread = std::thread(videoCaptureThreadMain, threadConfig, context_.get());
+    if (!config_.videoDeviceId.empty()) {
+        context_->videoThread = std::thread(videoCaptureThreadMain, threadConfig, context_.get());
+    }
     if (!config_.audioDeviceId.empty()) {
         context_->audioThread = std::thread(audioCaptureThreadMain, threadConfig, context_.get());
     }
@@ -1730,11 +1748,15 @@ Status LiveDeviceCaptureSource::start() {
         return audioInitStatus;
     }
 
-    config_.width = negotiatedVideoWidth > 0 ? negotiatedVideoWidth : config_.width;
-    config_.height = negotiatedVideoHeight > 0 ? negotiatedVideoHeight : config_.height;
-    config_.fps = negotiatedVideoFps > 0 ? negotiatedVideoFps : config_.fps;
-    config_.resolvedVideoDeviceName =
-        !selectedVideoDeviceName.empty() ? selectedVideoDeviceName : config_.videoDeviceId;
+    if (!config_.videoDeviceId.empty()) {
+        config_.width = negotiatedVideoWidth > 0 ? negotiatedVideoWidth : config_.width;
+        config_.height = negotiatedVideoHeight > 0 ? negotiatedVideoHeight : config_.height;
+        config_.fps = negotiatedVideoFps > 0 ? negotiatedVideoFps : config_.fps;
+        config_.resolvedVideoDeviceName =
+            !selectedVideoDeviceName.empty() ? selectedVideoDeviceName : config_.videoDeviceId;
+    } else {
+        config_.resolvedVideoDeviceName.clear();
+    }
     if (!config_.audioDeviceId.empty()) {
         config_.sampleRate = negotiatedSampleRate > 0 ? negotiatedSampleRate : config_.sampleRate;
         config_.channels = negotiatedChannels > 0 ? negotiatedChannels : config_.channels;

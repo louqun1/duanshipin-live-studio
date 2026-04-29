@@ -11,6 +11,7 @@ target_include_directories(rtc_guest_probe
 
 target_link_libraries(rtc_guest_probe
     PRIVATE
+        live_studio_core
         LibDataChannel::LibDataChannel
 )
 

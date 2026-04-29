@@ -1,0 +1,10 @@
+{
+    "transport":  "libdatachannel",
+    "roomName":  "stage1-apply-1777435642",
+    "participantRole":  "controller",
+    "signalingUrl":  "ws://192.168.3.28:8080/ws",
+    "requestId":  "lm-21c83e4f1df5dc5891585e00b10e82c0",
+    "requestType":  "linkmic.apply",
+    "controllerUserId":  26,
+    "participantUserId":  27
+}
