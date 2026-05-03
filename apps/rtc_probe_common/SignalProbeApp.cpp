@@ -1,14 +1,8 @@
 #include "SignalProbeApp.hpp"
-
-#include "capture/LiveDeviceCaptureSource.hpp"
-#include "encode/OpusAudioEncoder.hpp"
+#include "RtcAudioProbe.hpp"
+#include "SignalProbeSession.hpp"
 
 #include <rtc/rtc.hpp>
-#include <rtc/rtcpnackresponder.hpp>
-#include <rtc/rtcpreceivingsession.hpp>
-#include <rtc/rtcpsrreporter.hpp>
-#include <rtc/rtppacketizationconfig.hpp>
-#include <rtc/rtppacketizer.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -18,6 +12,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <future>
@@ -41,9 +36,9 @@ constexpr char kDefaultSignalingUrl[] = "ws://127.0.0.1:8080/ws";
 constexpr char kDefaultRtcRoomId[] = "stage0";
 constexpr char kDefaultSignalRoomId[] = "stage1";
 constexpr char kDefaultMicCaptureConfigPath[] = "apps/rtc_probe/default_mic_capture.txt";
+constexpr char kDefaultRecvAudioWavDir[] = "logs/rtc-audio";
 constexpr int kDefaultMediaRunMs = 5000;
 constexpr int kDefaultOpusBitrate = 64000;
-constexpr int kDefaultOpusPayloadType = 111;
 
 enum class ProbeMode {
     rtc,
@@ -72,6 +67,7 @@ struct ProbeArgs {
     bool relayOnly = false;
     bool sendMic = false;
     bool expectRemoteAudio = false;
+    std::string recvAudioWavPath;
     int timeoutMs = 30000;
     int requestTimeoutMs = 10000;
     int autoHangupMs = 2000;
@@ -79,25 +75,10 @@ struct ProbeArgs {
     int opusBitrate = kDefaultOpusBitrate;
 };
 
-struct ProbeOutboundAudioState {
-    std::shared_ptr<rtc::Track> track;
-    std::thread worker;
-    std::atomic_bool stopRequested{false};
-    std::atomic_bool trackOpen{false};
-    std::atomic_bool firstPacketSent{false};
-    std::atomic_int capturedFrames{0};
-    std::atomic_int sentPackets{0};
-    std::atomic_int droppedFramesBeforeTrackOpen{0};
-    std::atomic_llong sentSamples{0};
-    std::optional<std::chrono::steady_clock::time_point> completionDeadline;
-    live_studio::capture::LiveDeviceCaptureSource captureSource;
-    live_studio::encode::OpusAudioEncoder encoder;
-    int payloadType = kDefaultOpusPayloadType;
-    bool initialized = false;
-};
-
 struct ProbeRuntime {
     ProbeArgs args;
+    std::unique_ptr<rtc_probe_common::RtcAudioProbe> audioProbe;
+    std::unique_ptr<rtc_probe_common::SignalProbeSession> signalingSession;
     std::shared_ptr<rtc::WebSocket> ws;
     std::shared_ptr<rtc::PeerConnection> pc;
     std::shared_ptr<rtc::DataChannel> dc;
@@ -105,39 +86,33 @@ struct ProbeRuntime {
     std::shared_ptr<std::atomic_bool> doneFlag;
     std::mutex stateMutex;
     bool offerStarted = false;
-    bool registered = false;
-    bool targetPresent = false;
-    bool signalScenarioStarted = false;
-    bool waitingJoinParams = false;
-    bool autoHangupSent = false;
     bool shutdownRequested = false;
-    bool incomingAudioTrackOpened = false;
-    std::optional<std::chrono::steady_clock::time_point> requestDeadline;
-    std::optional<std::chrono::steady_clock::time_point> hangupDeadline;
-    std::optional<std::string> activeRequestId;
-    std::string activeRequestType;
-    std::string signalState;
-    std::vector<std::string> onlineMembers;
-    std::uint64_t requestSequence = 0;
     std::optional<std::string> failureMessage;
-    ProbeOutboundAudioState outboundAudio;
-    std::shared_ptr<rtc::Track> inboundAudioTrack;
-    std::atomic_bool inboundAudioFirstPacketLogged{false};
-    std::atomic_int inboundAudioPackets{0};
-
-    ~ProbeRuntime() {
-        outboundAudio.stopRequested.store(true);
-        outboundAudio.captureSource.stop();
-        if (outboundAudio.worker.joinable()) {
-            outboundAudio.worker.join();
-        }
-    }
 };
+
+std::string CurrentRequestId(ProbeRuntime& runtime);
+void LogProbeEvent(const ProbeArgs& args,
+                   const std::string& event,
+                   const std::string& detail,
+                   const std::string& state = "",
+                   const std::string& requestId = "",
+                   const std::string& remoteUserId = "");
+void MarkDone(const std::shared_ptr<std::promise<void>>& promise,
+              const std::shared_ptr<std::atomic_bool>& doneFlag);
+void RecordFailure(ProbeRuntime& runtime, const std::string& message);
 
 std::int64_t NowEpochMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
         .count();
+}
+
+std::string GenerateProbeRequestId(const ProbeArgs& args, const std::string& prefix) {
+    static std::atomic_uint64_t sequence{0};
+    std::ostringstream out;
+    out << prefix << "-" << args.peerId << "-to-" << args.targetId
+        << "-" << NowEpochMs() << "-" << sequence.fetch_add(1);
+    return out.str();
 }
 
 std::string ToLowerCopy(std::string value) {
@@ -199,46 +174,33 @@ SignalAction ParseSignalAction(const std::string& text) {
 }
 
 bool ShouldSendMic(const ProbeArgs& args) {
-    return args.mode == ProbeMode::rtc && args.role == "controller" && args.sendMic;
+    return args.mode == ProbeMode::rtc && args.sendMic;
 }
 
 bool ShouldExpectRemoteAudio(const ProbeArgs& args) {
     return args.mode == ProbeMode::rtc && args.expectRemoteAudio;
 }
 
-void ThrowIfStatusNotOk(const live_studio::Status& status, const std::string& context) {
-    if (!status.ok()) {
-        throw std::runtime_error(context + ": " + status.message);
-    }
-}
-
-std::uint32_t StableSsrcForArgs(const ProbeArgs& args) {
-    const std::string seed = args.peerId + "|" + args.targetId + "|" + args.roomId + "|audio";
-    const auto hashed = static_cast<std::uint32_t>(std::hash<std::string>{}(seed));
-    return hashed == 0 ? 1u : hashed;
-}
-
-std::string BuildOpusProfile(int channels, int bitrate) {
-    const bool stereo = channels > 1;
-    return "minptime=10;maxaveragebitrate=" + std::to_string(std::max(6000, bitrate)) +
-           ";stereo=" + (stereo ? "1" : "0") +
-           ";sprop-stereo=" + (stereo ? "1" : "0") +
-           ";useinbandfec=1";
-}
-
-std::string JoinStrings(const std::vector<std::string>& values) {
-    if (values.empty()) {
-        return "(none)";
-    }
-
-    std::ostringstream out;
-    for (std::size_t index = 0; index < values.size(); ++index) {
-        if (index != 0) {
-            out << ",";
+std::string SanitizeFileComponent(std::string value) {
+    for (char& ch : value) {
+        const bool keep = std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_';
+        if (!keep) {
+            ch = '_';
         }
-        out << values[index];
     }
-    return out.str();
+    if (value.empty()) {
+        return "audio";
+    }
+    return value;
+}
+
+std::string BuildDefaultRecvAudioWavPath(const ProbeArgs& args) {
+    const std::string fileName =
+        SanitizeFileComponent(args.roomId) + "-" +
+        SanitizeFileComponent(args.peerId) + "-from-" +
+        SanitizeFileComponent(args.targetId) + "-" +
+        std::to_string(NowEpochMs()) + ".wav";
+    return (std::filesystem::path(kDefaultRecvAudioWavDir) / fileName).string();
 }
 
 std::string NormalizeParticipantRole(const std::string& role) {
@@ -360,42 +322,20 @@ void ApplyRtcJoinParams(ProbeArgs& args, const json& root) {
     }
 }
 
-bool ContainsValue(const std::vector<std::string>& values, const std::string& target) {
-    return std::find(values.begin(), values.end(), target) != values.end();
-}
-
-std::string ResetStateForRole(const ProbeArgs& args) {
-    return args.role == "controller" ? "live-only" : "idle";
-}
-
-std::string ConnectingStateForRole(const ProbeArgs& args) {
-    return args.role == "controller" ? "linkmic-connecting" : "rtc-connecting";
-}
-
-std::string ActiveStateForRole(const ProbeArgs& args) {
-    return args.role == "controller" ? "linkmic-active" : "rtc-active";
-}
-
-std::string EndingStateForRole(const ProbeArgs& args) {
-    return args.role == "controller" ? "linkmic-ending" : "ending";
-}
-
 std::string CurrentSignalState(ProbeRuntime& runtime) {
-    std::lock_guard<std::mutex> lock(runtime.stateMutex);
-    return runtime.signalState;
+    return runtime.signalingSession ? runtime.signalingSession->currentSignalState() : "";
 }
 
 std::string CurrentRequestId(ProbeRuntime& runtime) {
-    std::lock_guard<std::mutex> lock(runtime.stateMutex);
-    return runtime.activeRequestId.value_or("");
+    return runtime.signalingSession ? runtime.signalingSession->currentRequestId() : "";
 }
 
 void LogProbeEvent(const ProbeArgs& args,
                    const std::string& event,
                    const std::string& detail,
-                   const std::string& state = "",
-                   const std::string& requestId = "",
-                   const std::string& remoteUserId = "") {
+                   const std::string& state,
+                   const std::string& requestId,
+                   const std::string& remoteUserId) {
     std::ostringstream out;
     out << "[" << args.role << "] event=" << event
         << " room_id=" << args.roomId
@@ -430,11 +370,12 @@ void PrintUsage(const SignalProbeDefaults& defaults) {
         << "  --rtc-join-params-file <v>   path to a JSON file containing rtcJoinParams or /linkmic/respond response\n"
         << "  --ice-server <value>         example: turn://user:pass@127.0.0.1:3478?transport=udp\n"
         << "  --relay-only                 require relay candidates only\n"
-        << "  --send-mic                   controller-side only; capture microphone and send Opus RTP\n"
-        << "  --expect-remote-audio        keep the RTC session alive until the inbound audio track closes\n"
+        << "  --send-mic                   capture microphone and send Opus RTP\n"
+        << "  --expect-remote-audio        keep the RTC session alive until the inbound audio probe completes\n"
+        << "  --recv-audio-wav <path>      decode inbound Opus and write PCM WAV\n"
         << "  --mic-capture-config <path>  default: " << kDefaultMicCaptureConfigPath << "\n"
         << "  --media-run-ms <value>       send duration after first audio packet, default: " << kDefaultMediaRunMs << "\n"
-        << "  --opus-bitrate <value>       controller-side only, default: " << kDefaultOpusBitrate << "\n"
+        << "  --opus-bitrate <value>       default: " << kDefaultOpusBitrate << "\n"
         << "  --timeout-ms <value>         overall timeout, default: 30000\n"
         << "  --request-timeout-ms <value> signal mode only, default: 10000\n"
         << "  --auto-hangup-ms <value>     signal mode only; controller sends hangup after active, default: 2000, <0 disables\n";
@@ -490,6 +431,8 @@ ProbeArgs ParseArgs(int argc, char** argv, const SignalProbeDefaults& defaults) 
             args.sendMic = true;
         } else if (arg == "--expect-remote-audio") {
             args.expectRemoteAudio = true;
+        } else if (arg == "--recv-audio-wav") {
+            args.recvAudioWavPath = requireValue(arg);
         } else if (arg == "--mic-capture-config") {
             args.micCaptureConfigPath = requireValue(arg);
         } else if (arg == "--media-run-ms") {
@@ -538,11 +481,17 @@ ProbeArgs ParseArgs(int argc, char** argv, const SignalProbeDefaults& defaults) 
     if (args.sendMic && args.mode != ProbeMode::rtc) {
         throw std::runtime_error("--send-mic is only supported in rtc mode");
     }
-    if (args.sendMic && args.role != "controller") {
-        throw std::runtime_error("--send-mic is currently supported on the controller side only");
-    }
     if (args.expectRemoteAudio && args.mode != ProbeMode::rtc) {
         throw std::runtime_error("--expect-remote-audio is only supported in rtc mode");
+    }
+    if (!args.recvAudioWavPath.empty() && args.mode != ProbeMode::rtc) {
+        throw std::runtime_error("--recv-audio-wav is only supported in rtc mode");
+    }
+    if (!args.recvAudioWavPath.empty()) {
+        args.expectRemoteAudio = true;
+    }
+    if (args.expectRemoteAudio && args.recvAudioWavPath.empty()) {
+        args.recvAudioWavPath = BuildDefaultRecvAudioWavPath(args);
     }
 
     return args;
@@ -582,36 +531,6 @@ json BuildSignalEnvelope(const ProbeArgs& args,
     return message;
 }
 
-void TransitionSignalState(ProbeRuntime& runtime,
-                           const std::string& nextState,
-                           const std::string& reason,
-                           const std::string& requestId = "",
-                           const std::string& remoteUserId = "") {
-    std::string previousState;
-    {
-        std::lock_guard<std::mutex> lock(runtime.stateMutex);
-        previousState = runtime.signalState;
-        runtime.signalState = nextState;
-    }
-
-    if (previousState.empty()) {
-        LogProbeEvent(runtime.args, "state", reason, nextState, requestId, remoteUserId);
-        return;
-    }
-
-    if (previousState == nextState) {
-        LogProbeEvent(runtime.args, "state", reason, nextState, requestId, remoteUserId);
-        return;
-    }
-
-    LogProbeEvent(runtime.args,
-                  "state",
-                  previousState + " -> " + nextState + " (" + reason + ")",
-                  nextState,
-                  requestId,
-                  remoteUserId);
-}
-
 void RecordFailure(ProbeRuntime& runtime, const std::string& message) {
     bool firstFailure = false;
     {
@@ -623,525 +542,29 @@ void RecordFailure(ProbeRuntime& runtime, const std::string& message) {
     }
 
     if (firstFailure) {
-        TransitionSignalState(runtime, "failed", message, CurrentRequestId(runtime), runtime.args.targetId);
+        LogProbeEvent(runtime.args,
+                      "state",
+                      message,
+                      "failed",
+                      CurrentRequestId(runtime),
+                      runtime.args.targetId);
     }
     MarkDone(runtime.donePromise, runtime.doneFlag);
-}
-
-std::string GenerateRequestId(ProbeRuntime& runtime, const std::string& prefix) {
-    std::uint64_t sequence = 0;
-    {
-        std::lock_guard<std::mutex> lock(runtime.stateMutex);
-        sequence = ++runtime.requestSequence;
-    }
-
-    std::ostringstream out;
-    out << prefix << "-" << runtime.args.peerId << "-to-" << runtime.args.targetId
-        << "-" << NowEpochMs() << "-" << sequence;
-    return out.str();
-}
-
-void SendBusinessMessage(ProbeRuntime& runtime,
-                         const std::string& type,
-                         const std::string& toUserId,
-                         const std::string& requestId,
-                         json payload,
-                         const std::string& detail) {
-    LogProbeEvent(runtime.args,
-                  "send." + type,
-                  detail,
-                  CurrentSignalState(runtime),
-                  requestId,
-                  toUserId);
-    SendJson(runtime.ws, BuildSignalEnvelope(runtime.args, type, toUserId, requestId, std::move(payload)));
-}
-
-void StartOutgoingSignalRequest(ProbeRuntime& runtime,
-                                const std::string& messageType,
-                                const std::string& nextState,
-                                const std::string& detail) {
-    const std::string requestId = GenerateRequestId(runtime, "stage1");
-    {
-        std::lock_guard<std::mutex> lock(runtime.stateMutex);
-        runtime.activeRequestId = requestId;
-        runtime.activeRequestType = messageType;
-        runtime.signalScenarioStarted = true;
-        runtime.waitingJoinParams = false;
-        runtime.autoHangupSent = false;
-        runtime.requestDeadline = std::chrono::steady_clock::now()
-            + std::chrono::milliseconds(runtime.args.requestTimeoutMs);
-        runtime.hangupDeadline.reset();
-    }
-
-    TransitionSignalState(runtime, nextState, detail, requestId, runtime.args.targetId);
-    SendBusinessMessage(runtime,
-                        messageType,
-                        runtime.args.targetId,
-                        requestId,
-                        {
-                            {"initiator_role", runtime.args.role},
-                            {"probe_mode", "signal"}
-                        },
-                        detail);
-}
-
-bool MessageTargetsLocalUser(const json& message, const std::string& localUserId) {
-    if (!message.contains("to_user_id")) {
-        return true;
-    }
-    const std::string toUserId = message.value("to_user_id", "");
-    return toUserId.empty() || toUserId == localUserId || toUserId == "*";
-}
-
-bool ActiveRequestMatches(ProbeRuntime& runtime, const std::string& requestId) {
-    std::lock_guard<std::mutex> lock(runtime.stateMutex);
-    if (!runtime.activeRequestId.has_value()) {
-        return true;
-    }
-    if (requestId.empty()) {
-        return false;
-    }
-    return *runtime.activeRequestId == requestId;
-}
-
-std::string ExtractRequestId(const json& message) {
-    return message.value("request_id", "");
-}
-
-std::string ExtractMemberId(const json& member) {
-    if (member.is_string()) {
-        return member.get<std::string>();
-    }
-    if (!member.is_object()) {
-        return "";
-    }
-    if (member.contains("peer_id")) {
-        return member.value("peer_id", "");
-    }
-    if (member.contains("user_id")) {
-        return member.value("user_id", "");
-    }
-    if (member.contains("member_id")) {
-        return member.value("member_id", "");
-    }
-    return "";
-}
-
-std::vector<std::string> ExtractMemberIds(const json& message) {
-    std::vector<std::string> members;
-    const json* container = nullptr;
-    if (message.contains("peers")) {
-        container = &message.at("peers");
-    } else if (message.contains("members")) {
-        container = &message.at("members");
-    }
-
-    if (container == nullptr || !container->is_array()) {
-        return members;
-    }
-
-    for (const auto& member : *container) {
-        const std::string memberId = ExtractMemberId(member);
-        if (!memberId.empty()) {
-            members.push_back(memberId);
-        }
-    }
-    return members;
-}
-
-std::string ExtractUserIdFromPayload(const json& message) {
-    if (message.contains("payload")) {
-        const auto& payload = message.at("payload");
-        if (payload.is_object()) {
-            if (payload.contains("member")) {
-                return ExtractMemberId(payload.at("member"));
-            }
-            const std::string userId = ExtractMemberId(payload);
-            if (!userId.empty()) {
-                return userId;
-            }
-        }
-    }
-
-    if (message.contains("member")) {
-        return ExtractMemberId(message.at("member"));
-    }
-
-    if (message.contains("user_id")) {
-        return message.value("user_id", "");
-    }
-    if (message.contains("peer_id")) {
-        return message.value("peer_id", "");
-    }
-    return message.value("from_user_id", "");
-}
-
-void UpdateTargetPresenceFromSnapshot(ProbeRuntime& runtime, std::vector<std::string> members) {
-    bool targetPresent = ContainsValue(members, runtime.args.targetId);
-    {
-        std::lock_guard<std::mutex> lock(runtime.stateMutex);
-        runtime.onlineMembers = std::move(members);
-        runtime.targetPresent = targetPresent;
-    }
-}
-
-void MaybeStartSignalScenario(ProbeRuntime& runtime) {
-    if (runtime.args.mode != ProbeMode::signal) {
-        return;
-    }
-
-    const bool controllerShouldInvite =
-        runtime.args.role == "controller" && runtime.args.signalAction == SignalAction::invite;
-    const bool participantShouldApply =
-        runtime.args.role != "controller" && runtime.args.signalAction == SignalAction::apply;
-    if (!controllerShouldInvite && !participantShouldApply) {
-        return;
-    }
-
-    bool shouldStart = false;
-    {
-        std::lock_guard<std::mutex> lock(runtime.stateMutex);
-        if (!runtime.registered || !runtime.targetPresent || runtime.signalScenarioStarted
-            || runtime.activeRequestId.has_value()) {
-            return;
-        }
-        shouldStart = true;
-    }
-
-    if (!shouldStart) {
-        return;
-    }
-
-    if (controllerShouldInvite) {
-        StartOutgoingSignalRequest(runtime,
-                                   "linkmic.invite",
-                                   "host-inviting",
-                                   "target is online, sending linkmic.invite");
-        return;
-    }
-
-    StartOutgoingSignalRequest(runtime,
-                               "linkmic.apply",
-                               "waiting-host",
-                               "controller is online, sending linkmic.apply");
-}
-
-void AttachInboundTrackHandlers(const std::shared_ptr<rtc::Track>& track,
-                                ProbeRuntime& runtime,
-                                const std::string& peerId) {
-    const std::string mid = track->mid();
-    const std::string kind = track->description().type();
-
-    track->onOpen([&runtime, peerId, mid, kind]() {
-        LogProbeEvent(runtime.args,
-                      "rtc.track-open",
-                      "opened mid=" + mid + " kind=" + kind,
-                      "",
-                      CurrentRequestId(runtime),
-                      peerId);
-        if (kind == "audio") {
-            std::lock_guard<std::mutex> lock(runtime.stateMutex);
-            runtime.incomingAudioTrackOpened = true;
-        }
-    });
-
-    track->onClosed([&runtime, peerId, mid, kind]() {
-        bool shutdownRequested = false;
-        bool shouldMarkDone = false;
-        {
-            std::lock_guard<std::mutex> lock(runtime.stateMutex);
-            shutdownRequested = runtime.shutdownRequested;
-            shouldMarkDone = !shutdownRequested && ShouldExpectRemoteAudio(runtime.args) &&
-                runtime.incomingAudioTrackOpened && kind == "audio";
-        }
-
-        LogProbeEvent(runtime.args,
-                      "rtc.track-closed",
-                      "closed mid=" + mid + " kind=" + kind,
-                      "",
-                      CurrentRequestId(runtime),
-                      peerId);
-
-        if (shouldMarkDone) {
-            MarkDone(runtime.donePromise, runtime.doneFlag);
-        }
-    });
-
-    track->onError([&runtime, peerId, mid](const std::string& error) {
-        RecordFailure(runtime, "track " + mid + " error: " + error + " peer=" + peerId);
-    });
-}
-
-void EnsureInboundAudioReady(ProbeRuntime& runtime) {
-    if (!ShouldExpectRemoteAudio(runtime.args) || runtime.args.role == "controller") {
-        return;
-    }
-    if (runtime.inboundAudioTrack) {
-        return;
-    }
-    if (!runtime.pc) {
-        throw std::runtime_error("cannot initialize inbound audio before PeerConnection exists");
-    }
-
-    rtc::Description::Audio audioDescription("audio", rtc::Description::Direction::RecvOnly);
-    audioDescription.addOpusCodec(kDefaultOpusPayloadType);
-
-    runtime.inboundAudioTrack = runtime.pc->addTrack(audioDescription);
-    auto receivingSession = std::make_shared<rtc::RtcpReceivingSession>();
-    runtime.inboundAudioTrack->setMediaHandler(receivingSession);
-    runtime.inboundAudioTrack->onMessage(
-        [&runtime](rtc::binary message) {
-            const int packets = runtime.inboundAudioPackets.fetch_add(1) + 1;
-            {
-                std::lock_guard<std::mutex> lock(runtime.stateMutex);
-                runtime.incomingAudioTrackOpened = true;
-            }
-            bool expected = false;
-            if (runtime.inboundAudioFirstPacketLogged.compare_exchange_strong(expected, true)) {
-                LogProbeEvent(runtime.args,
-                              "rtc.audio-packet-recv",
-                              "first inbound RTP packet size=" + std::to_string(message.size()),
-                              "",
-                              CurrentRequestId(runtime),
-                              runtime.args.targetId);
-            } else if (packets % 100 == 0) {
-                LogProbeEvent(runtime.args,
-                              "rtc.audio-packet-recv",
-                              "packets=" + std::to_string(packets),
-                              "",
-                              CurrentRequestId(runtime),
-                              runtime.args.targetId);
-            }
-        },
-        nullptr);
-    AttachInboundTrackHandlers(runtime.inboundAudioTrack, runtime, runtime.args.targetId);
-
-    LogProbeEvent(runtime.args,
-                  "rtc.audio-track-recv-ready",
-                  "prepared recvonly Opus audio track before answer",
-                  "",
-                  CurrentRequestId(runtime),
-                  runtime.args.targetId);
-}
-
-void AttachOutboundAudioTrackHandlers(const std::shared_ptr<rtc::Track>& track,
-                                      ProbeRuntime& runtime,
-                                      const std::string& peerId) {
-    const std::string mid = track->mid();
-
-    track->onOpen([&runtime, peerId, mid]() {
-        runtime.outboundAudio.trackOpen.store(true);
-        LogProbeEvent(runtime.args,
-                      "rtc.audio-track-open",
-                      "opened mid=" + mid,
-                      "",
-                      CurrentRequestId(runtime),
-                      peerId);
-    });
-
-    track->onClosed([&runtime, peerId, mid]() {
-        runtime.outboundAudio.trackOpen.store(false);
-
-        bool shutdownRequested = false;
-        {
-            std::lock_guard<std::mutex> lock(runtime.stateMutex);
-            shutdownRequested = runtime.shutdownRequested;
-        }
-
-        LogProbeEvent(runtime.args,
-                      "rtc.audio-track-closed",
-                      "closed mid=" + mid,
-                      "",
-                      CurrentRequestId(runtime),
-                      peerId);
-
-        if (!shutdownRequested && ShouldSendMic(runtime.args) && !runtime.doneFlag->load()) {
-            RecordFailure(runtime, "outbound audio track closed before the media run completed");
-        }
-    });
-
-    track->onError([&runtime, peerId, mid](const std::string& error) {
-        RecordFailure(runtime, "outbound audio track " + mid + " error: " + error + " peer=" + peerId);
-    });
-}
-
-void OutboundAudioWorkerMain(ProbeRuntime* runtime) {
-    auto& state = runtime->outboundAudio;
-    try {
-        while (!state.stopRequested.load() && !runtime->doneFlag->load()) {
-            live_studio::capture::CaptureEvent event;
-            const live_studio::Status readStatus = state.captureSource.readNext(&event);
-            if (!readStatus.ok()) {
-                if (!state.stopRequested.load() && !runtime->doneFlag->load()) {
-                    RecordFailure(*runtime, "microphone capture failed: " + readStatus.message);
-                }
-                break;
-            }
-
-            if (event.kind != live_studio::capture::CaptureEventKind::audio) {
-                continue;
-            }
-
-            state.capturedFrames.fetch_add(1);
-            if (!state.trackOpen.load()) {
-                state.droppedFramesBeforeTrackOpen.fetch_add(1);
-                continue;
-            }
-
-            std::vector<live_studio::encode::EncodedOpusFrame> encodedFrames;
-            const live_studio::Status encodeStatus = state.encoder.encodeFrame(event.audioFrame, &encodedFrames);
-            if (!encodeStatus.ok()) {
-                RecordFailure(*runtime, "Opus encode failed: " + encodeStatus.message);
-                break;
-            }
-
-            for (const auto& encodedFrame : encodedFrames) {
-                if (state.stopRequested.load() || runtime->doneFlag->load()) {
-                    break;
-                }
-
-                try {
-                    runtime->outboundAudio.track->sendFrame(
-                        reinterpret_cast<const rtc::byte*>(encodedFrame.payload.data()),
-                        encodedFrame.payload.size(),
-                        std::chrono::duration<double>(
-                            static_cast<double>(encodedFrame.ptsSamples) /
-                            static_cast<double>(std::max(1, encodedFrame.sampleRate))));
-                } catch (const std::exception& exception) {
-                    RecordFailure(*runtime, std::string("failed to send Opus frame: ") + exception.what());
-                    break;
-                }
-
-                const int sentPackets = state.sentPackets.fetch_add(1) + 1;
-                state.sentSamples.fetch_add(encodedFrame.samplesPerChannel);
-
-                bool firstPacket = false;
-                bool expected = false;
-                if (state.firstPacketSent.compare_exchange_strong(expected, true)) {
-                    firstPacket = true;
-                    {
-                        std::lock_guard<std::mutex> lock(runtime->stateMutex);
-                        state.completionDeadline = std::chrono::steady_clock::now()
-                            + std::chrono::milliseconds(runtime->args.mediaRunMs);
-                    }
-                    LogProbeEvent(runtime->args,
-                                  "rtc.audio-send-start",
-                                  "first packet sent " + encodedFrame.payloadSummary +
-                                      " run_ms=" + std::to_string(runtime->args.mediaRunMs),
-                                  "",
-                                  CurrentRequestId(*runtime),
-                                  runtime->args.targetId);
-                }
-
-                if (firstPacket || sentPackets % 100 == 0) {
-                    LogProbeEvent(runtime->args,
-                                  "rtc.audio-packet-sent",
-                                  encodedFrame.payloadSummary + " packets=" + std::to_string(sentPackets),
-                                  "",
-                                  CurrentRequestId(*runtime),
-                                  runtime->args.targetId);
-                }
-            }
-        }
-    } catch (const std::exception& exception) {
-        if (!state.stopRequested.load() && !runtime->doneFlag->load()) {
-            RecordFailure(*runtime, std::string("outbound audio worker failed: ") + exception.what());
-        }
-    }
-}
-
-void EnsureOutboundAudioReady(ProbeRuntime& runtime) {
-    if (!ShouldSendMic(runtime.args)) {
-        return;
-    }
-    if (runtime.outboundAudio.initialized) {
-        return;
-    }
-    if (!runtime.pc) {
-        throw std::runtime_error("cannot initialize outbound audio before PeerConnection exists");
-    }
-
-    auto& state = runtime.outboundAudio;
-    ThrowIfStatusNotOk(state.captureSource.configureDeviceSource(runtime.args.micCaptureConfigPath),
-                       "failed to load mic capture config");
-    ThrowIfStatusNotOk(state.captureSource.start(), "failed to start microphone capture");
-    if (!state.captureSource.hasAudio()) {
-        throw std::runtime_error("mic capture config did not enable audio_device");
-    }
-
-    const auto& captureConfig = state.captureSource.config();
-    ThrowIfStatusNotOk(state.encoder.configure(captureConfig.sampleRate, captureConfig.channels, runtime.args.opusBitrate),
-                       "failed to configure Opus encoder");
-
-    const std::uint32_t ssrc = StableSsrcForArgs(runtime.args);
-    const std::string cname = runtime.args.peerId + "-audio";
-    const std::string msid = runtime.args.peerId + "-stream";
-
-    rtc::Description::Audio audioDescription("audio");
-    audioDescription.addOpusCodec(state.payloadType, BuildOpusProfile(captureConfig.channels, runtime.args.opusBitrate));
-    audioDescription.addSSRC(ssrc, cname, msid, cname);
-
-    state.track = runtime.pc->addTrack(audioDescription);
-    auto rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(ssrc,
-                                                                   cname,
-                                                                   static_cast<std::uint8_t>(state.payloadType),
-                                                                   48000);
-    auto packetizer = std::make_shared<rtc::OpusRtpPacketizer>(rtpConfig);
-    auto senderReport = std::make_shared<rtc::RtcpSrReporter>(rtpConfig);
-    packetizer->addToChain(senderReport);
-    packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
-    state.track->setMediaHandler(packetizer);
-
-    AttachOutboundAudioTrackHandlers(state.track, runtime, runtime.args.targetId);
-
-    state.worker = std::thread(OutboundAudioWorkerMain, &runtime);
-    state.initialized = true;
-
-    LogProbeEvent(runtime.args,
-                  "rtc.audio-track-added",
-                  "configured " + captureConfig.resolvedAudioDeviceName + " " +
-                      std::to_string(captureConfig.sampleRate) + "Hz/" +
-                      std::to_string(captureConfig.channels) + "ch bitrate=" +
-                      std::to_string(runtime.args.opusBitrate),
-                  "",
-                  CurrentRequestId(runtime),
-                  runtime.args.targetId);
 }
 
 void CheckRtcMediaTimers(ProbeRuntime& runtime) {
-    if (!ShouldSendMic(runtime.args)) {
-        return;
+    if (runtime.audioProbe) {
+        runtime.audioProbe->checkMediaTimers();
     }
-
-    bool shouldComplete = false;
-    {
-        std::lock_guard<std::mutex> lock(runtime.stateMutex);
-        shouldComplete = runtime.outboundAudio.completionDeadline.has_value() &&
-            std::chrono::steady_clock::now() >= *runtime.outboundAudio.completionDeadline;
-        if (shouldComplete) {
-            runtime.outboundAudio.completionDeadline.reset();
-        }
-    }
-
-    if (!shouldComplete) {
-        return;
-    }
-
-    LogProbeEvent(runtime.args,
-                  "rtc.media-run-complete",
-                  "sent_packets=" + std::to_string(runtime.outboundAudio.sentPackets.load()) +
-                      " captured_frames=" + std::to_string(runtime.outboundAudio.capturedFrames.load()) +
-                      " dropped_before_track_open=" +
-                      std::to_string(runtime.outboundAudio.droppedFramesBeforeTrackOpen.load()),
-                  "",
-                  CurrentRequestId(runtime),
-                  runtime.args.targetId);
-    MarkDone(runtime.donePromise, runtime.doneFlag);
 }
 
 void AttachDataChannelHandlers(const std::shared_ptr<rtc::DataChannel>& dc,
                                ProbeRuntime& runtime,
                                const std::string& peerId) {
+    if (runtime.audioProbe) {
+        runtime.audioProbe->bindDataChannel(dc);
+    }
+
     dc->onOpen([wdc = std::weak_ptr<rtc::DataChannel>(dc), &runtime, peerId]() {
         try {
             LogProbeEvent(runtime.args,
@@ -1153,7 +576,9 @@ void AttachDataChannelHandlers(const std::shared_ptr<rtc::DataChannel>& dc,
             if (auto locked = wdc.lock()) {
                 locked->send("hello-from-" + runtime.args.role + "-" + runtime.args.peerId);
             }
-            if (!ShouldSendMic(runtime.args) && !ShouldExpectRemoteAudio(runtime.args)) {
+            if (runtime.audioProbe) {
+                runtime.audioProbe->onDataChannelOpen();
+            } else if (!ShouldSendMic(runtime.args) && !ShouldExpectRemoteAudio(runtime.args)) {
                 MarkDone(runtime.donePromise, runtime.doneFlag);
             }
         } catch (const std::exception& exception) {
@@ -1172,9 +597,15 @@ void AttachDataChannelHandlers(const std::shared_ptr<rtc::DataChannel>& dc,
 
     dc->onMessage([&runtime, peerId](rtc::message_variant data) {
         if (std::holds_alternative<std::string>(data)) {
+            const std::string payload = std::get<std::string>(data);
+            if (runtime.audioProbe &&
+                runtime.audioProbe->handleDataChannelStringMessage(payload, peerId)) {
+                return;
+            }
+
             LogProbeEvent(runtime.args,
                           "rtc.data-channel-message",
-                          std::get<std::string>(data),
+                          payload,
                           "",
                           CurrentRequestId(runtime),
                           peerId);
@@ -1253,20 +684,8 @@ std::shared_ptr<rtc::PeerConnection> CreatePeerConnection(ProbeRuntime& runtime)
                       "",
                       CurrentRequestId(runtime),
                       runtime.args.targetId);
-        if (ShouldSendMic(runtime.args)) {
-            if (state == rtc::PeerConnection::State::Connected) {
-                runtime.outboundAudio.trackOpen.store(true);
-                LogProbeEvent(runtime.args,
-                              "rtc.audio-send-ready",
-                              "peer connection connected, outbound audio may flow",
-                              "",
-                              CurrentRequestId(runtime),
-                              runtime.args.targetId);
-            } else if (state == rtc::PeerConnection::State::Disconnected ||
-                       state == rtc::PeerConnection::State::Failed ||
-                       state == rtc::PeerConnection::State::Closed) {
-                runtime.outboundAudio.trackOpen.store(false);
-            }
+        if (runtime.audioProbe) {
+            runtime.audioProbe->onPeerConnectionStateChange(state);
         }
         if (state == rtc::PeerConnection::State::Failed) {
             RecordFailure(runtime, "PeerConnection entered failed state");
@@ -1313,7 +732,9 @@ std::shared_ptr<rtc::PeerConnection> CreatePeerConnection(ProbeRuntime& runtime)
                       "",
                       CurrentRequestId(runtime),
                       runtime.args.targetId);
-        AttachInboundTrackHandlers(track, runtime, runtime.args.targetId);
+        if (runtime.audioProbe) {
+            runtime.audioProbe->attachInboundTrackHandlers(track, runtime.args.targetId);
+        }
     });
 
     return pc;
@@ -1327,16 +748,20 @@ void EnsureOfferStarted(ProbeRuntime& runtime) {
             return;
         }
         runtime.offerStarted = true;
-        if (runtime.activeRequestId.has_value() && !runtime.activeRequestId->empty()) {
-            requestId = *runtime.activeRequestId;
-        } else {
-            requestId = GenerateRequestId(runtime, "rtc");
-            runtime.activeRequestId = requestId;
+    }
+    requestId = CurrentRequestId(runtime);
+    if (requestId.empty()) {
+        requestId = GenerateProbeRequestId(runtime.args, "rtc");
+        if (runtime.signalingSession) {
+            runtime.signalingSession->adoptActiveRequestId(requestId);
         }
     }
 
     runtime.pc = CreatePeerConnection(runtime);
-    EnsureOutboundAudioReady(runtime);
+    if (runtime.audioProbe) {
+        runtime.audioProbe->ensureOutboundReady(runtime.pc);
+        runtime.audioProbe->ensureInboundReady(runtime.pc);
+    }
     runtime.dc = runtime.pc->createDataChannel("stage0");
     AttachDataChannelHandlers(runtime.dc, runtime, runtime.args.targetId);
 
@@ -1349,374 +774,20 @@ void EnsureOfferStarted(ProbeRuntime& runtime) {
 }
 
 void HandleRegistrationAndMemberMessages(ProbeRuntime& runtime, const json& message) {
-    const std::string type = message.value("type", "");
-    if (type == "probe.registered") {
-        {
-            std::lock_guard<std::mutex> lock(runtime.stateMutex);
-            runtime.registered = true;
-        }
-        LogProbeEvent(runtime.args,
-                      "probe.registered",
-                      "registration acknowledged by signaling service",
-                      runtime.args.mode == ProbeMode::signal ? CurrentSignalState(runtime) : "",
-                      CurrentRequestId(runtime),
-                      runtime.args.targetId);
-        MaybeStartSignalScenario(runtime);
-        return;
-    }
-
-    if (type == "room.member-list") {
-        const auto members = ExtractMemberIds(message);
-        UpdateTargetPresenceFromSnapshot(runtime, members);
-
-        std::ostringstream detail;
-        detail << "online_count=" << members.size() << " members=" << JoinStrings(members);
-        LogProbeEvent(runtime.args,
-                      "room.member-list",
-                      detail.str(),
-                      runtime.args.mode == ProbeMode::signal ? CurrentSignalState(runtime) : "",
-                      "",
-                      runtime.args.targetId);
-
-        if (runtime.args.mode == ProbeMode::rtc && runtime.args.role == "controller"
-            && ContainsValue(members, runtime.args.targetId)) {
-            EnsureOfferStarted(runtime);
-            return;
-        }
-
-        MaybeStartSignalScenario(runtime);
-        return;
-    }
-
-    if (type == "room.member-join" || type == "room.member-leave") {
-        const std::string memberId = ExtractUserIdFromPayload(message);
-        if (memberId.empty()) {
-            return;
-        }
-
-        bool targetLeftDuringSession = false;
-        bool targetLeaveShouldFail = false;
-        std::vector<std::string> snapshot;
-        {
-            std::lock_guard<std::mutex> lock(runtime.stateMutex);
-            snapshot = runtime.onlineMembers;
-            if (type == "room.member-join") {
-                if (!ContainsValue(snapshot, memberId)) {
-                    snapshot.push_back(memberId);
-                }
-            } else {
-                snapshot.erase(std::remove(snapshot.begin(), snapshot.end(), memberId), snapshot.end());
-                if (memberId == runtime.args.targetId && runtime.activeRequestId.has_value()) {
-                    targetLeftDuringSession = true;
-                    targetLeaveShouldFail =
-                        !ShouldExpectRemoteAudio(runtime.args) || !runtime.incomingAudioTrackOpened;
-                }
-            }
-            runtime.onlineMembers = snapshot;
-            runtime.targetPresent = ContainsValue(snapshot, runtime.args.targetId);
-        }
-
-        LogProbeEvent(runtime.args,
-                      type,
-                      "member=" + memberId + " online_members=" + JoinStrings(snapshot),
-                      runtime.args.mode == ProbeMode::signal ? CurrentSignalState(runtime) : "",
-                      "",
-                      memberId);
-
-        if (targetLeftDuringSession && targetLeaveShouldFail) {
-            RecordFailure(runtime, "target user left the room before the scenario completed");
-            return;
-        }
-
-        MaybeStartSignalScenario(runtime);
+    if (runtime.signalingSession) {
+        runtime.signalingSession->handleRegistrationAndMemberMessage(message);
     }
 }
 
 void HandleSignalPhaseMessage(ProbeRuntime& runtime, const json& message) {
-    const std::string type = message.value("type", "");
-    if (type == "probe.registered" || type == "room.member-list" || type == "room.member-join"
-        || type == "room.member-leave") {
-        HandleRegistrationAndMemberMessages(runtime, message);
-        return;
-    }
-
-    if (type == "signal.error") {
-        throw std::runtime_error(message.value("message", "signaling error"));
-    }
-
-    if (!MessageTargetsLocalUser(message, runtime.args.peerId)) {
-        return;
-    }
-
-    const std::string requestId = ExtractRequestId(message);
-    const std::string remoteUserId = message.value("from_user_id", "");
-    const bool echoedFromLocalUser = remoteUserId == runtime.args.peerId;
-    if (!echoedFromLocalUser && !remoteUserId.empty() && remoteUserId != runtime.args.targetId) {
-        return;
-    }
-
-    if (type == "linkmic.apply") {
-        if (echoedFromLocalUser || runtime.args.role != "controller") {
-            return;
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(runtime.stateMutex);
-            runtime.activeRequestId = requestId;
-            runtime.activeRequestType = type;
-            runtime.signalScenarioStarted = true;
-            runtime.requestDeadline = std::chrono::steady_clock::now()
-                + std::chrono::milliseconds(runtime.args.requestTimeoutMs);
-        }
-        TransitionSignalState(runtime, "guest-applying", "received linkmic.apply", requestId, remoteUserId);
-
-        if (runtime.args.signalAction == SignalAction::accept) {
-            {
-                std::lock_guard<std::mutex> lock(runtime.stateMutex);
-                runtime.waitingJoinParams = true;
-                runtime.requestDeadline = std::chrono::steady_clock::now()
-                    + std::chrono::milliseconds(runtime.args.requestTimeoutMs);
-            }
-            TransitionSignalState(runtime,
-                                  ConnectingStateForRole(runtime.args),
-                                  "accepting guest apply and waiting for rtc.join-params",
-                                  requestId,
-                                  remoteUserId);
-            SendBusinessMessage(runtime,
-                                "linkmic.accept",
-                                remoteUserId,
-                                requestId,
-                                {
-                                    {"accepted_from", "linkmic.apply"},
-                                    {"decision", "accept"}
-                                },
-                                "accepted incoming guest apply");
-            return;
-        }
-
-        if (runtime.args.signalAction == SignalAction::reject) {
-            SendBusinessMessage(runtime,
-                                "linkmic.reject",
-                                remoteUserId,
-                                requestId,
-                                {
-                                    {"rejected_from", "linkmic.apply"},
-                                    {"decision", "reject"}
-                                },
-                                "rejected incoming guest apply");
-            TransitionSignalState(runtime,
-                                  ResetStateForRole(runtime.args),
-                                  "rejected guest apply",
-                                  requestId,
-                                  remoteUserId);
-            MarkDone(runtime.donePromise, runtime.doneFlag);
-        }
-        return;
-    }
-
-    if (type == "linkmic.invite") {
-        if (echoedFromLocalUser || runtime.args.role == "controller") {
-            return;
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(runtime.stateMutex);
-            runtime.activeRequestId = requestId;
-            runtime.activeRequestType = type;
-            runtime.signalScenarioStarted = true;
-            runtime.requestDeadline = std::chrono::steady_clock::now()
-                + std::chrono::milliseconds(runtime.args.requestTimeoutMs);
-        }
-        TransitionSignalState(runtime, "guest-invited", "received linkmic.invite", requestId, remoteUserId);
-
-        if (runtime.args.signalAction == SignalAction::accept) {
-            {
-                std::lock_guard<std::mutex> lock(runtime.stateMutex);
-                runtime.waitingJoinParams = true;
-                runtime.requestDeadline = std::chrono::steady_clock::now()
-                    + std::chrono::milliseconds(runtime.args.requestTimeoutMs);
-            }
-            TransitionSignalState(runtime,
-                                  ConnectingStateForRole(runtime.args),
-                                  "accepting host invite and waiting for rtc.join-params",
-                                  requestId,
-                                  remoteUserId);
-            SendBusinessMessage(runtime,
-                                "linkmic.accept",
-                                remoteUserId,
-                                requestId,
-                                {
-                                    {"accepted_from", "linkmic.invite"},
-                                    {"decision", "accept"}
-                                },
-                                "accepted incoming host invite");
-            return;
-        }
-
-        if (runtime.args.signalAction == SignalAction::reject) {
-            SendBusinessMessage(runtime,
-                                "linkmic.reject",
-                                remoteUserId,
-                                requestId,
-                                {
-                                    {"rejected_from", "linkmic.invite"},
-                                    {"decision", "reject"}
-                                },
-                                "rejected incoming host invite");
-            TransitionSignalState(runtime,
-                                  ResetStateForRole(runtime.args),
-                                  "rejected host invite",
-                                  requestId,
-                                  remoteUserId);
-            MarkDone(runtime.donePromise, runtime.doneFlag);
-        }
-        return;
-    }
-
-    if (type == "linkmic.accept") {
-        if (echoedFromLocalUser) {
-            return;
-        }
-        if (!ActiveRequestMatches(runtime, requestId)) {
-            return;
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(runtime.stateMutex);
-            runtime.activeRequestId = requestId;
-            runtime.waitingJoinParams = true;
-            runtime.requestDeadline = std::chrono::steady_clock::now()
-                + std::chrono::milliseconds(runtime.args.requestTimeoutMs);
-        }
-        TransitionSignalState(runtime,
-                              ConnectingStateForRole(runtime.args),
-                              "received linkmic.accept, waiting for rtc.join-params",
-                              requestId,
-                              remoteUserId);
-        return;
-    }
-
-    if (type == "rtc.join-params" || type == "linkmic.connected") {
-        if (echoedFromLocalUser) {
-            return;
-        }
-        if (!ActiveRequestMatches(runtime, requestId)) {
-            return;
-        }
-
-        const std::string payloadText = message.contains("payload") ? message.at("payload").dump() : "{}";
-        bool shouldScheduleAutoHangup = false;
-        {
-            std::lock_guard<std::mutex> lock(runtime.stateMutex);
-            runtime.waitingJoinParams = false;
-            runtime.requestDeadline.reset();
-            runtime.activeRequestId = requestId.empty() ? runtime.activeRequestId : std::optional<std::string>(requestId);
-            if (runtime.args.role == "controller"
-                && runtime.args.autoHangupMs >= 0
-                && !runtime.autoHangupSent
-                && !runtime.hangupDeadline.has_value()) {
-                runtime.hangupDeadline = std::chrono::steady_clock::now()
-                    + std::chrono::milliseconds(runtime.args.autoHangupMs);
-                shouldScheduleAutoHangup = true;
-            }
-        }
-        TransitionSignalState(runtime,
-                              ActiveStateForRole(runtime.args),
-                              "received " + type,
-                              requestId,
-                              remoteUserId);
-        LogProbeEvent(runtime.args,
-                      "recv." + type,
-                      payloadText,
-                      CurrentSignalState(runtime),
-                      requestId,
-                      remoteUserId);
-
-        if (runtime.args.autoHangupMs < 0) {
-            MarkDone(runtime.donePromise, runtime.doneFlag);
-            return;
-        }
-
-        if (shouldScheduleAutoHangup) {
-            LogProbeEvent(runtime.args,
-                          "timer.auto-hangup",
-                          "will send linkmic.hangup after " + std::to_string(runtime.args.autoHangupMs) + " ms",
-                          CurrentSignalState(runtime),
-                          requestId,
-                          remoteUserId);
-        }
-        return;
-    }
-
-    if (type == "linkmic.reject" || type == "linkmic.cancel") {
-        if (echoedFromLocalUser) {
-            return;
-        }
-        if (!ActiveRequestMatches(runtime, requestId)) {
-            return;
-        }
-        TransitionSignalState(runtime,
-                              ResetStateForRole(runtime.args),
-                              "received " + type,
-                              requestId,
-                              remoteUserId);
-        MarkDone(runtime.donePromise, runtime.doneFlag);
-        return;
-    }
-
-    if (type == "linkmic.hangup" || type == "linkmic.kick") {
-        if (echoedFromLocalUser) {
-            return;
-        }
-        if (!ActiveRequestMatches(runtime, requestId)) {
-            return;
-        }
-        TransitionSignalState(runtime,
-                              ResetStateForRole(runtime.args),
-                              "received " + type,
-                              requestId,
-                              remoteUserId);
-        MarkDone(runtime.donePromise, runtime.doneFlag);
-        return;
-    }
-
-    if (type == "linkmic.state-sync") {
-        if (!ActiveRequestMatches(runtime, requestId)) {
-            return;
-        }
-        const std::string syncedState = message.contains("payload") && message.at("payload").is_object()
-            ? message.at("payload").value("state", "")
-            : message.value("state", "");
-
-        if (!syncedState.empty()) {
-            TransitionSignalState(runtime,
-                                  syncedState,
-                                  "received linkmic.state-sync",
-                                  requestId,
-                                  remoteUserId);
-            if (syncedState == ResetStateForRole(runtime.args)) {
-                MarkDone(runtime.donePromise, runtime.doneFlag);
-            }
-            return;
-        }
-
-        LogProbeEvent(runtime.args,
-                      "recv.linkmic.state-sync",
-                      message.dump(),
-                      CurrentSignalState(runtime),
-                      requestId,
-                      remoteUserId);
+    if (runtime.signalingSession) {
+        runtime.signalingSession->handleSignalModeMessage(message);
     }
 }
 
 void HandleRtcPhaseMessage(ProbeRuntime& runtime, const json& message) {
     const auto type = message.value("type", "");
-    const std::string requestId = ExtractRequestId(message);
-    if (type == "probe.registered" || type == "room.member-list" || type == "room.member-join"
-        || type == "room.member-leave") {
-        HandleRegistrationAndMemberMessages(runtime, message);
-        return;
-    }
+    const std::string requestId = message.value("request_id", "");
 
     if (type == "rtc.offer") {
         if (message.value("to_user_id", "") != runtime.args.peerId) {
@@ -1725,18 +796,19 @@ void HandleRtcPhaseMessage(ProbeRuntime& runtime, const json& message) {
         if (message.value("from_user_id", "") != runtime.args.targetId) {
             return;
         }
-        if (!ActiveRequestMatches(runtime, requestId)) {
+        if (runtime.signalingSession && !runtime.signalingSession->matchesActiveRequest(requestId)) {
             return;
         }
-
-        {
-            std::lock_guard<std::mutex> lock(runtime.stateMutex);
-            runtime.activeRequestId = requestId.empty() ? runtime.activeRequestId : std::optional<std::string>(requestId);
+        if (runtime.signalingSession) {
+            runtime.signalingSession->adoptActiveRequestId(requestId);
         }
 
         if (!runtime.pc) {
             runtime.pc = CreatePeerConnection(runtime);
-            EnsureInboundAudioReady(runtime);
+        }
+        if (runtime.audioProbe) {
+            runtime.audioProbe->ensureOutboundReady(runtime.pc);
+            runtime.audioProbe->ensureInboundReady(runtime.pc);
         }
 
         const auto payload = message.at("payload");
@@ -1759,7 +831,7 @@ void HandleRtcPhaseMessage(ProbeRuntime& runtime, const json& message) {
         if (message.value("from_user_id", "") != runtime.args.targetId) {
             return;
         }
-        if (!ActiveRequestMatches(runtime, requestId)) {
+        if (runtime.signalingSession && !runtime.signalingSession->matchesActiveRequest(requestId)) {
             return;
         }
 
@@ -1783,7 +855,7 @@ void HandleRtcPhaseMessage(ProbeRuntime& runtime, const json& message) {
         if (message.value("from_user_id", "") != runtime.args.targetId) {
             return;
         }
-        if (!ActiveRequestMatches(runtime, requestId)) {
+        if (runtime.signalingSession && !runtime.signalingSession->matchesActiveRequest(requestId)) {
             return;
         }
 
@@ -1806,6 +878,11 @@ void HandleRtcPhaseMessage(ProbeRuntime& runtime, const json& message) {
 }
 
 void HandleSignalingMessage(ProbeRuntime& runtime, const json& message) {
+    if (runtime.signalingSession &&
+        runtime.signalingSession->handleRegistrationAndMemberMessage(message)) {
+        return;
+    }
+
     if (runtime.args.mode == ProbeMode::signal) {
         HandleSignalPhaseMessage(runtime, message);
         return;
@@ -1815,53 +892,8 @@ void HandleSignalingMessage(ProbeRuntime& runtime, const json& message) {
 }
 
 void CheckSignalTimers(ProbeRuntime& runtime) {
-    std::optional<std::string> timeoutMessage;
-    std::optional<std::string> timeoutRequestId;
-    std::optional<std::string> hangupRequestId;
-
-    {
-        std::lock_guard<std::mutex> lock(runtime.stateMutex);
-        const auto now = std::chrono::steady_clock::now();
-
-        if (runtime.requestDeadline.has_value() && now >= *runtime.requestDeadline) {
-            timeoutRequestId = runtime.activeRequestId;
-            if (runtime.waitingJoinParams) {
-                timeoutMessage = "timed out waiting for rtc.join-params";
-            } else if (!runtime.activeRequestType.empty()) {
-                timeoutMessage = "timed out waiting for " + runtime.activeRequestType + " response";
-            } else {
-                timeoutMessage = "timed out waiting for signal phase progress";
-            }
-            runtime.requestDeadline.reset();
-        } else if (runtime.hangupDeadline.has_value() && now >= *runtime.hangupDeadline
-                   && !runtime.autoHangupSent && runtime.activeRequestId.has_value()) {
-            runtime.autoHangupSent = true;
-            runtime.hangupDeadline.reset();
-            hangupRequestId = runtime.activeRequestId;
-        }
-    }
-
-    if (timeoutMessage.has_value()) {
-        RecordFailure(runtime, *timeoutMessage);
-        return;
-    }
-
-    if (hangupRequestId.has_value()) {
-        TransitionSignalState(runtime,
-                              EndingStateForRole(runtime.args),
-                              "auto hangup timer reached",
-                              *hangupRequestId,
-                              runtime.args.targetId);
-        SendBusinessMessage(runtime,
-                            "linkmic.hangup",
-                            runtime.args.targetId,
-                            *hangupRequestId,
-                            {
-                                {"reason", "auto-hangup"},
-                                {"probe_mode", "signal"}
-                            },
-                            "controller requested session teardown");
-        MarkDone(runtime.donePromise, runtime.doneFlag);
+    if (runtime.signalingSession) {
+        runtime.signalingSession->checkSignalTimers();
     }
 }
 
@@ -1886,6 +918,9 @@ void PrintBanner(const ProbeArgs& args) {
     std::cout << "  relay_only: " << (args.relayOnly ? "true" : "false") << "\n";
     std::cout << "  send_mic: " << (args.sendMic ? "true" : "false") << "\n";
     std::cout << "  expect_remote_audio: " << (args.expectRemoteAudio ? "true" : "false") << "\n";
+    if (!args.recvAudioWavPath.empty()) {
+        std::cout << "  recv_audio_wav: " << args.recvAudioWavPath << "\n";
+    }
     if (args.sendMic) {
         std::cout << "  mic_capture_config: " << args.micCaptureConfigPath << "\n";
         std::cout << "  media_run_ms: " << args.mediaRunMs << "\n";
@@ -1908,8 +943,96 @@ int RunSignalProbeApp(int argc, char** argv, const SignalProbeDefaults& defaults
     runtime.ws = std::make_shared<rtc::WebSocket>();
     runtime.donePromise = std::make_shared<std::promise<void>>();
     runtime.doneFlag = std::make_shared<std::atomic_bool>(false);
-    runtime.signalState = runtime.args.mode == ProbeMode::signal ? ResetStateForRole(runtime.args) : "";
-    runtime.activeRequestId = runtime.args.requestId;
+    rtc_probe_common::SignalProbeSessionConfig signalingConfig;
+    signalingConfig.role = runtime.args.role;
+    signalingConfig.peerId = runtime.args.peerId;
+    signalingConfig.targetId = runtime.args.targetId;
+    signalingConfig.roomId = runtime.args.roomId;
+    signalingConfig.signalMode = runtime.args.mode == ProbeMode::signal;
+    signalingConfig.isController = runtime.args.role == "controller";
+    signalingConfig.startInviteWhenReady =
+        runtime.args.mode == ProbeMode::signal && runtime.args.role == "controller" &&
+        runtime.args.signalAction == SignalAction::invite;
+    signalingConfig.startApplyWhenReady =
+        runtime.args.mode == ProbeMode::signal && runtime.args.role != "controller" &&
+        runtime.args.signalAction == SignalAction::apply;
+    signalingConfig.autoAcceptIncoming =
+        runtime.args.mode == ProbeMode::signal && runtime.args.signalAction == SignalAction::accept;
+    signalingConfig.autoRejectIncoming =
+        runtime.args.mode == ProbeMode::signal && runtime.args.signalAction == SignalAction::reject;
+    signalingConfig.requestTimeoutMs = runtime.args.requestTimeoutMs;
+    signalingConfig.autoHangupMs = runtime.args.autoHangupMs;
+    signalingConfig.initialRequestId = runtime.args.requestId;
+
+    rtc_probe_common::SignalProbeSessionCallbacks signalingCallbacks;
+    signalingCallbacks.logEvent =
+        [&runtime](const std::string& event,
+                   const std::string& detail,
+                   const std::string& state,
+                   const std::string& requestId,
+                   const std::string& remoteUserId) {
+            LogProbeEvent(runtime.args, event, detail, state, requestId, remoteUserId);
+        };
+    signalingCallbacks.sendJson = [&runtime](const json& message) {
+        SendJson(runtime.ws, message);
+    };
+    signalingCallbacks.recordFailure = [&runtime](const std::string& message) {
+        RecordFailure(runtime, message);
+    };
+    signalingCallbacks.markDone = [&runtime]() {
+        MarkDone(runtime.donePromise, runtime.doneFlag);
+    };
+    signalingCallbacks.onRtcOfferRequested = [&runtime]() {
+        EnsureOfferStarted(runtime);
+    };
+    signalingCallbacks.shouldFailWhenTargetLeavesDuringSession = [&runtime]() {
+        return !ShouldExpectRemoteAudio(runtime.args) ||
+            !runtime.audioProbe ||
+            !runtime.audioProbe->hasSatisfiedInboundAudioProbe();
+    };
+    runtime.signalingSession = std::make_unique<rtc_probe_common::SignalProbeSession>(
+        std::move(signalingConfig),
+        std::move(signalingCallbacks));
+    rtc_probe_common::RtcAudioProbeConfig audioProbeConfig;
+    audioProbeConfig.role = runtime.args.role;
+    audioProbeConfig.peerId = runtime.args.peerId;
+    audioProbeConfig.targetId = runtime.args.targetId;
+    audioProbeConfig.roomId = runtime.args.roomId;
+    audioProbeConfig.micCaptureConfigPath = runtime.args.micCaptureConfigPath;
+    audioProbeConfig.recvAudioWavPath = runtime.args.recvAudioWavPath;
+    audioProbeConfig.sendMic = runtime.args.sendMic;
+    audioProbeConfig.expectRemoteAudio = runtime.args.expectRemoteAudio;
+    audioProbeConfig.mediaRunMs = runtime.args.mediaRunMs;
+    audioProbeConfig.opusBitrate = runtime.args.opusBitrate;
+
+    rtc_probe_common::RtcAudioProbeCallbacks audioProbeCallbacks;
+    audioProbeCallbacks.currentRequestId = [&runtime]() {
+        return CurrentRequestId(runtime);
+    };
+    audioProbeCallbacks.logEvent =
+        [&runtime](const std::string& event, const std::string& detail, const std::string& remoteUserId) {
+            LogProbeEvent(runtime.args,
+                          event,
+                          detail,
+                          "",
+                          CurrentRequestId(runtime),
+                          remoteUserId);
+        };
+    audioProbeCallbacks.recordFailure = [&runtime](const std::string& message) {
+        RecordFailure(runtime, message);
+    };
+    audioProbeCallbacks.markDone = [&runtime]() {
+        MarkDone(runtime.donePromise, runtime.doneFlag);
+    };
+    audioProbeCallbacks.isDone = [&runtime]() {
+        return runtime.doneFlag->load();
+    };
+    audioProbeCallbacks.isShutdownRequested = [&runtime]() {
+        std::lock_guard<std::mutex> lock(runtime.stateMutex);
+        return runtime.shutdownRequested;
+    };
+    runtime.audioProbe =
+        std::make_unique<rtc_probe_common::RtcAudioProbe>(std::move(audioProbeConfig), std::move(audioProbeCallbacks));
 
     std::promise<void> wsReadyPromise;
     auto wsReadyFuture = wsReadyPromise.get_future();
@@ -1917,11 +1040,6 @@ int RunSignalProbeApp(int argc, char** argv, const SignalProbeDefaults& defaults
 
     runtime.ws->onOpen([&runtime, &wsReadyPromise, wsReadySettled]() {
         try {
-            {
-                std::lock_guard<std::mutex> lock(runtime.stateMutex);
-                runtime.registered = false;
-            }
-
             json registerMessage = {
                 {"type", "probe.register"},
                 {"room_id", runtime.args.roomId},
@@ -2027,12 +1145,6 @@ int RunSignalProbeApp(int argc, char** argv, const SignalProbeDefaults& defaults
             throw std::runtime_error(*runtime.failureMessage);
         }
         runtime.shutdownRequested = true;
-    }
-
-    runtime.outboundAudio.stopRequested.store(true);
-    runtime.outboundAudio.captureSource.stop();
-    if (runtime.outboundAudio.worker.joinable()) {
-        runtime.outboundAudio.worker.join();
     }
 
     std::this_thread::sleep_for(500ms);

@@ -1,4 +1,6 @@
 add_executable(rtc_probe
+    ../rtc_probe_common/RtcAudioProbe.cpp
+    ../rtc_probe_common/SignalProbeSession.cpp
     ../rtc_probe_common/SignalProbeApp.cpp
     main.cpp
 )

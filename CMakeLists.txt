@@ -77,6 +77,8 @@ message(STATUS "duanshipin-live-studio FFmpeg root: ${LIVE_STUDIO_FFMPEG_ROOT}")
 
 add_library(live_studio_core
     src/capture/LiveDeviceCaptureSource.cpp
+    src/common/WavFileWriter.cpp
+    src/decode/OpusAudioDecoder.cpp
     src/encode/AudioEncoder.cpp
     src/encode/OpusAudioEncoder.cpp
     src/encode/VideoEncoder.cpp
@@ -119,7 +121,11 @@ if(WIN32)
     )
 endif()
 
-add_subdirectory(apps/stage1_video_trace)
+if(EXISTS "${CMAKE_SOURCE_DIR}/apps/stage1_video_trace/CMakeLists.txt")
+    add_subdirectory(apps/stage1_video_trace)
+else()
+    message(WARNING "Skipping apps/stage1_video_trace because the directory is missing")
+endif()
 
 if(LIVE_STUDIO_BUILD_RTC_PROBES)
     live_studio_require_libdatachannel()
