@@ -220,7 +220,9 @@ bool SignalProbeSession::handleRegistrationAndMemberMessage(const json& message)
                 }
             } else {
                 snapshot.erase(std::remove(snapshot.begin(), snapshot.end(), memberId), snapshot.end());
-                if (memberId == config_.targetId && activeRequestId_.has_value()) {
+                const bool sessionStillActive =
+                    activeRequestId_.has_value() && signalState_ != resetStateForRole();
+                if (memberId == config_.targetId && sessionStillActive) {
                     targetLeftDuringSession = true;
                     targetLeaveShouldFail = callbacks_.shouldFailWhenTargetLeavesDuringSession
                         ? callbacks_.shouldFailWhenTargetLeavesDuringSession()
