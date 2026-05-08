@@ -21,6 +21,27 @@
 - 后续对比评估
 - 当 `libdatachannel` 路线在 RTP、编解码或维护成本上超出预期时回退参考
 
+`编 libdatachannel`
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_libdatachannel.ps1 `
+  -OpenSslRootDir "D:\itffmpeg\x86_64-15.2.0-release-posix-seh-ucrt-rt_v13-rev1\mingw64\opt" `
+  -CCompiler "D:\itffmpeg\Qt\Tools\llvm-mingw1706_64\bin\x86_64-w64-mingw32-clang.exe" `
+  -CxxCompiler "D:\itffmpeg\Qt\Tools\llvm-mingw1706_64\bin\x86_64-w64-mingw32-clang++.exe"
+  
+`编前端面版`
+cmake --build build-qt-6103-llvm --target live_studio_panel -j 4
+`运行前端面板`
+.\build-qt-6103-llvm\apps\live_studio_panel\live_studio_panel.exe
+
+`配置主工程`
+cmake -S . -B build-qt-6103-llvm -G "MinGW Makefiles" `
+  -DLIVE_STUDIO_BUILD_RTC_PROBES=ON `
+  -DLIVE_STUDIO_QT_ROOT=D:/itffmpeg/Qt/6.10.3/llvm-mingw_64 `
+  -DCMAKE_MAKE_PROGRAM=D:/itffmpeg/Qt/Tools/llvm-mingw1706_64/bin/mingw32-make.exe `
+  -DCMAKE_C_COMPILER=D:/itffmpeg/Qt/Tools/llvm-mingw1706_64/bin/x86_64-w64-mingw32-clang.exe `
+  -DCMAKE_CXX_COMPILER=D:/itffmpeg/Qt/Tools/llvm-mingw1706_64/bin/x86_64-w64-mingw32-clang++.exe
+
+
+
 ## 1. 方案定位
 
 这条路线适合下面这种目标：

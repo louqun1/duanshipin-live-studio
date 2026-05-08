@@ -7,7 +7,6 @@
 #include "capture/LiveDeviceCaptureSource.hpp"
 #include "common/MediaTypes.hpp"
 #include "common/Status.hpp"
-#include "common/TraceLog.hpp"
 
 namespace live_studio::session {
 
@@ -75,11 +74,6 @@ public:
     [[nodiscard]] PreviewFrameSnapshot latestPreviewFrame() const;
     [[nodiscard]] AudioLevelSnapshot latestAudioLevel() const;
     [[nodiscard]] SessionDiagnostics diagnostics() const;
-
-    Status runStage1VideoTrace(const std::string& rtmpUrl,
-                               const std::string& captureConfigPath,
-                               int frameCountOverride,
-                               TraceLog* trace);
 
 private:
     std::unique_ptr<ControllerState> state_;

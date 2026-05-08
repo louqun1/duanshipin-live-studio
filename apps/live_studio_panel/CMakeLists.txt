@@ -1,7 +1,26 @@
+if(NOT TARGET Qt6::Core OR NOT TARGET Qt6::Gui OR NOT TARGET Qt6::Widgets OR
+   NOT TARGET Qt6::Concurrent OR NOT TARGET Qt6::Network)
+    message(WARNING "Skipping live_studio_panel because required Qt6 base modules are missing.")
+    return()
+endif()
+
+find_package(Qt6WebSockets QUIET)
+if(NOT TARGET Qt6::WebSockets)
+    message(WARNING "Skipping live_studio_panel because Qt6 WebSockets is not available.")
+    return()
+endif()
+
 add_executable(live_studio_panel
+    BusinessLiveClient.cpp
+    BusinessLiveClient.hpp
+    BusinessLiveTypes.hpp
     LiveStudioWindow.cpp
     LiveStudioWindow.hpp
     main.cpp
+    ${CMAKE_SOURCE_DIR}/src/linkmic/LinkMicRoomState.cpp
+    ${CMAKE_SOURCE_DIR}/src/linkmic/LinkMicSession.cpp
+    ${CMAKE_SOURCE_DIR}/src/linkmic/LinkMicSignalingClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/linkmic/RoomMemberDirectory.cpp
 )
 
 target_include_directories(live_studio_panel
@@ -14,11 +33,14 @@ target_link_libraries(live_studio_panel
         Qt6::Concurrent
         Qt6::Core
         Qt6::Gui
+        Qt6::Network
+        Qt6::WebSockets
         Qt6::Widgets
         live_studio_core
 )
 
 set_target_properties(live_studio_panel PROPERTIES
+    AUTOMOC ON
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/apps/live_studio_panel
     RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}/apps/live_studio_panel
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/apps/live_studio_panel
@@ -37,6 +59,8 @@ foreach(_live_studio_runtime_file IN LISTS _live_studio_ffmpeg_runtime_files)
             $<TARGET_FILE_DIR:live_studio_panel>
     )
 endforeach()
+
+live_studio_copy_target_runtime_dlls(live_studio_panel)
 
 if(WIN32)
     find_program(LIVE_STUDIO_WINDEPLOYQT_EXECUTABLE

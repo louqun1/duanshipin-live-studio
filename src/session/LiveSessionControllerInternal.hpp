@@ -19,6 +19,7 @@
 
 #include "encode/AudioEncoder.hpp"
 #include "encode/VideoEncoder.hpp"
+#include "common/TraceLog.hpp"
 #include "mux/FlvMuxer.hpp"
 #include "publish/RtmpPublisher.hpp"
 #include "session/LiveSessionController.hpp"
@@ -31,6 +32,8 @@ inline constexpr std::size_t kAudioInputQueueCapacity = 64;
 inline constexpr std::size_t kSenderQueueCapacity = 256;
 inline constexpr int kVideoTraceInterval = 30;
 inline constexpr int kAudioTraceInterval = 50;
+inline constexpr std::int64_t kPreviewFrameCopyIntervalNs = 100000000LL;
+inline constexpr std::size_t kVideoQueueCoalesceThreshold = 2;
 
 inline std::int64_t steadyClockNowNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -185,6 +188,38 @@ public:
             *outSizeAfterPush = items_.size();
         }
         notEmpty_.notify_one();
+        return true;
+    }
+
+    bool coalesceToNewest(T* inOutItem,
+                          std::size_t minPendingItems,
+                          std::size_t* outDroppedCount = nullptr,
+                          std::size_t* outSizeAfterCoalesce = nullptr) {
+        if (inOutItem == nullptr) {
+            return false;
+        }
+
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (outDroppedCount != nullptr) {
+            *outDroppedCount = 0;
+        }
+        if (items_.size() < minPendingItems) {
+            if (outSizeAfterCoalesce != nullptr) {
+                *outSizeAfterCoalesce = items_.size();
+            }
+            return true;
+        }
+
+        const std::size_t droppedCount = items_.size();
+        *inOutItem = std::move(items_.back());
+        items_.clear();
+        if (outDroppedCount != nullptr) {
+            *outDroppedCount = droppedCount;
+        }
+        if (outSizeAfterCoalesce != nullptr) {
+            *outSizeAfterCoalesce = items_.size();
+        }
+        notFull_.notify_all();
         return true;
     }
 
@@ -375,6 +410,7 @@ struct LiveSessionController::ControllerState {
     std::thread workerThread;
     bool workerStopRequested = false;
     bool workerThreadRunning = false;
+    std::int64_t lastPreviewFrameStoredNs = 0;
     TraceLog* trace = nullptr;
     std::unique_ptr<PublishSession> publishSession;
 };
@@ -382,11 +418,22 @@ struct LiveSessionController::ControllerState {
 using PublishSession = LiveSessionController::ControllerState::PublishSession;
 
 inline void updatePreviewStateLocked(LiveSessionController::ControllerState* state, const media::VideoFrame& frame) {
+    ++state->diagnostics.previewedVideoFrames;
+
+    const std::int64_t previewSampleNs = frame.captureWallClockNs > 0 ? frame.captureWallClockNs : steadyClockNowNs();
+    const bool shouldStoreFrame =
+        !state->latestPreviewFrame.available || state->lastPreviewFrameStoredNs <= 0 ||
+        previewSampleNs <= state->lastPreviewFrameStoredNs ||
+        (previewSampleNs - state->lastPreviewFrameStoredNs) >= kPreviewFrameCopyIntervalNs;
+    if (!shouldStoreFrame) {
+        return;
+    }
+
     state->latestPreviewFrame.available = true;
     state->latestPreviewFrame.frameIndex = frame.frameIndex;
     state->latestPreviewFrame.ptsMs = frame.ptsMs;
     state->latestPreviewFrame.frame = frame;
-    ++state->diagnostics.previewedVideoFrames;
+    state->lastPreviewFrameStoredNs = previewSampleNs;
 }
 
 inline void updateAudioLevelLocked(LiveSessionController::ControllerState* state, const media::AudioFrame& frame) {
@@ -435,9 +482,7 @@ std::string maybeRecordVideoPerfEncoded(PublishSession* session,
 
 Status seedPublishEpoch(PublishSession* session, std::int64_t captureWallClockNs);
 
-Status prepareVideoFrameForPublish(PublishSession* session,
-                                   const media::VideoFrame& frame,
-                                   media::VideoFrame* outFrame);
+Status prepareVideoFrameForPublish(PublishSession* session, media::VideoFrame frame, media::VideoFrame* outFrame);
 
 Status normalizeAudioUnitsForPublish(PublishSession* session,
                                      const media::AudioFrame& sourceFrame,

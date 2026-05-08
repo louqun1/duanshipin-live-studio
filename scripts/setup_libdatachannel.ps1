@@ -105,10 +105,10 @@ if (-not $SourceDir) {
     $SourceDir = Join-Path $repoRoot "third_party/libdatachannel-src"
 }
 if (-not $BuildDir) {
-    $BuildDir = Join-Path $repoRoot "third_party/libdatachannel-build"
+    $BuildDir = Join-Path $repoRoot "third_party/libdatachannel-build-clang"
 }
 if (-not $InstallDir) {
-    $InstallDir = Join-Path $repoRoot "third_party/libdatachannel-install"
+    $InstallDir = Join-Path $repoRoot "third_party/libdatachannel-install-clang"
 }
 
 $resolvedOpenSslRootDir = Resolve-OpenSslRootDir -ExplicitPath $OpenSslRootDir

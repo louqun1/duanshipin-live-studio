@@ -86,7 +86,7 @@ if (-not $BuildDir) {
     $BuildDir = Join-Path $repoRoot "build-rtc"
 }
 if (-not $LibDataChannelInstallDir) {
-    $LibDataChannelInstallDir = Join-Path $repoRoot "third_party/libdatachannel-install"
+    $LibDataChannelInstallDir = Join-Path $repoRoot "third_party/libdatachannel-install-clang"
 }
 
 $packageConfig = Join-Path $LibDataChannelInstallDir "lib/cmake/LibDataChannel/LibDataChannelConfig.cmake"

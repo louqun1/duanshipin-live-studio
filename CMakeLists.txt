@@ -9,7 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(LiveStudioRtcDeps)
 
-set(LIVE_STUDIO_QT_ROOT "D:/itffmpeg/Qt/6.10.2/llvm-mingw_64" CACHE PATH
+set(LIVE_STUDIO_QT_ROOT "D:/itffmpeg/Qt/6.10.3/llvm-mingw_64" CACHE PATH
     "Qt 6 root used for the Widgets publish panel")
 set(_live_studio_default_build_qt_panel ON)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND LIVE_STUDIO_QT_ROOT MATCHES "llvm-mingw")
@@ -18,10 +18,51 @@ endif()
 option(LIVE_STUDIO_BUILD_QT_PANEL "Build the minimal Qt Widgets publish panel"
        ${_live_studio_default_build_qt_panel})
 option(LIVE_STUDIO_BUILD_RTC_PROBES "Build the libdatachannel-based RTC probe apps" OFF)
+set(_live_studio_default_libdatachannel_install_dir
+    "${CMAKE_SOURCE_DIR}/third_party/libdatachannel-install")
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU" AND
+   EXISTS "${CMAKE_SOURCE_DIR}/third_party/libdatachannel-install-clang")
+    set(_live_studio_default_libdatachannel_install_dir
+        "${CMAKE_SOURCE_DIR}/third_party/libdatachannel-install-clang")
+endif()
 set(LIVE_STUDIO_LIBDATACHANNEL_INSTALL_DIR
-    "${CMAKE_SOURCE_DIR}/third_party/libdatachannel-install"
+    "${_live_studio_default_libdatachannel_install_dir}"
     CACHE PATH
     "Root directory of the installed LibDataChannel package")
+if(LIVE_STUDIO_QT_ROOT MATCHES "llvm-mingw")
+    set(_live_studio_legacy_libdatachannel_install_dir
+        "${CMAKE_SOURCE_DIR}/third_party/libdatachannel-install")
+    set(_live_studio_llvm_libdatachannel_install_dir
+        "${CMAKE_SOURCE_DIR}/third_party/libdatachannel-install-clang")
+    set(_live_studio_legacy_libdatachannel_package_dir
+        "${_live_studio_legacy_libdatachannel_install_dir}/lib/cmake/LibDataChannel")
+    set(_live_studio_llvm_libdatachannel_package_dir
+        "${_live_studio_llvm_libdatachannel_install_dir}/lib/cmake/LibDataChannel")
+
+    if(LIVE_STUDIO_LIBDATACHANNEL_INSTALL_DIR STREQUAL
+       "${_live_studio_legacy_libdatachannel_install_dir}" AND
+       EXISTS "${_live_studio_llvm_libdatachannel_package_dir}")
+        set(LIVE_STUDIO_LIBDATACHANNEL_INSTALL_DIR
+            "${_live_studio_llvm_libdatachannel_install_dir}"
+            CACHE PATH
+            "Root directory of the installed LibDataChannel package"
+            FORCE)
+    endif()
+
+    if(DEFINED LibDataChannel_DIR AND
+       LibDataChannel_DIR STREQUAL "${_live_studio_legacy_libdatachannel_package_dir}" AND
+       EXISTS "${_live_studio_llvm_libdatachannel_package_dir}")
+        set(LibDataChannel_DIR
+            "${_live_studio_llvm_libdatachannel_package_dir}"
+            CACHE PATH
+            "CMake package directory for LibDataChannel"
+            FORCE)
+    endif()
+endif()
+set(LIVE_STUDIO_OPENSSL_ROOT_DIR
+    "D:/itffmpeg/x86_64-15.2.0-release-posix-seh-ucrt-rt_v13-rev1/mingw64/opt"
+    CACHE PATH
+    "Root directory of the OpenSSL runtime used by libdatachannel-based apps")
 
 set(LIVE_STUDIO_SPDLOG_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/third_party/spdlog/include")
 if(NOT EXISTS "${LIVE_STUDIO_SPDLOG_INCLUDE_DIR}/spdlog/spdlog.h")
@@ -121,12 +162,6 @@ if(WIN32)
     )
 endif()
 
-if(EXISTS "${CMAKE_SOURCE_DIR}/apps/stage1_video_trace/CMakeLists.txt")
-    add_subdirectory(apps/stage1_video_trace)
-else()
-    message(WARNING "Skipping apps/stage1_video_trace because the directory is missing")
-endif()
-
 if(LIVE_STUDIO_BUILD_RTC_PROBES)
     live_studio_require_libdatachannel()
     add_subdirectory(apps/rtc_probe)
@@ -145,7 +180,7 @@ if(LIVE_STUDIO_BUILD_QT_PANEL)
             "D:/itffmpeg/Qt/Tools/llvm-mingw1706_64/bin/clang++.exe and clang.exe.")
     endif()
 
-    find_package(Qt6 COMPONENTS Core Gui Widgets Concurrent QUIET)
+    find_package(Qt6 COMPONENTS Core Gui Widgets Concurrent Network QUIET)
     if(Qt6_FOUND)
         add_subdirectory(apps/live_studio_panel)
     else()

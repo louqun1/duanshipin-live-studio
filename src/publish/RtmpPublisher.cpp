@@ -601,7 +601,7 @@ std::vector<std::uint8_t> buildConnectCommandPayload(const RtmpUrlParts& urlPart
     appendAmf0ObjectPropertyName("type", &payload);
     appendAmf0String("nonprivate", &payload);
     appendAmf0ObjectPropertyName("flashVer", &payload);
-    appendAmf0String("FMLE/3.0 (compatible; stage1_video_trace)", &payload);
+    appendAmf0String("FMLE/3.0 (compatible; duanshipin-live-studio)", &payload);
     appendAmf0ObjectPropertyName("tcUrl", &payload);
     appendAmf0String(urlParts.tcUrl, &payload);
     appendAmf0ObjectPropertyName("fpad", &payload);
@@ -681,7 +681,7 @@ std::vector<std::uint8_t> buildOnMetaDataPayload(int width,
         appendAmf0Boolean(audioChannels > 1, &payload);
     }
     appendAmf0ObjectPropertyName("encoder", &payload);
-    appendAmf0String("duanshipin-live-studio/stage1_video_trace", &payload);
+    appendAmf0String("duanshipin-live-studio/publisher", &payload);
     appendAmf0ObjectEnd(&payload);
 
     return payload;

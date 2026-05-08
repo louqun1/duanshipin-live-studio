@@ -57,4 +57,25 @@ function(live_studio_copy_target_runtime_dlls target_name)
             )
         endif()
     endif()
+
+    if(DEFINED LIVE_STUDIO_OPENSSL_ROOT_DIR AND EXISTS "${LIVE_STUDIO_OPENSSL_ROOT_DIR}/bin")
+        set(_live_studio_openssl_runtime_dlls "")
+        foreach(_live_studio_openssl_runtime_name
+                libcrypto-3-x64.dll
+                libssl-3-x64.dll)
+            if(EXISTS "${LIVE_STUDIO_OPENSSL_ROOT_DIR}/bin/${_live_studio_openssl_runtime_name}")
+                list(APPEND _live_studio_openssl_runtime_dlls
+                    "${LIVE_STUDIO_OPENSSL_ROOT_DIR}/bin/${_live_studio_openssl_runtime_name}")
+            endif()
+        endforeach()
+
+        if(_live_studio_openssl_runtime_dlls)
+            add_custom_command(TARGET ${target_name} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${_live_studio_openssl_runtime_dlls}
+                    "$<TARGET_FILE_DIR:${target_name}>"
+                COMMAND_EXPAND_LISTS
+            )
+        endif()
+    endif()
 endfunction()

@@ -176,9 +176,7 @@ Status seedPublishEpoch(PublishSession* session, std::int64_t captureWallClockNs
     return Status::Ok();
 }
 
-Status prepareVideoFrameForPublish(PublishSession* session,
-                                   const media::VideoFrame& frame,
-                                   media::VideoFrame* outFrame) {
+Status prepareVideoFrameForPublish(PublishSession* session, media::VideoFrame frame, media::VideoFrame* outFrame) {
     if (session == nullptr) {
         return Status::InvalidArgument("publish session is null");
     }
@@ -189,14 +187,14 @@ Status prepareVideoFrameForPublish(PublishSession* session,
         return Status::InvalidArgument("video frame captureWallClockNs must be positive");
     }
 
-    media::VideoFrame publishFrame = frame;
+    media::VideoFrame publishFrame = std::move(frame);
     {
         std::lock_guard<std::mutex> lock(session->timingMutex);
         if (!session->epochInitialized) {
             session->epochInitialized = true;
-            session->epochWallClockNs = frame.captureWallClockNs;
+            session->epochWallClockNs = publishFrame.captureWallClockNs;
         }
-        publishFrame.ptsMs = monotonicTimestampMs(frame.captureWallClockNs,
+        publishFrame.ptsMs = monotonicTimestampMs(publishFrame.captureWallClockNs,
                                                   session->epochWallClockNs,
                                                   &session->lastVideoTimestampMs);
     }
@@ -444,13 +442,20 @@ void videoEncodeThreadMain(LiveSessionController::ControllerState* state, Publis
             break;
         }
 
+        std::size_t coalescedFrames = 0;
+        session->videoInputQueue.coalesceToNewest(&input, kVideoQueueCoalesceThreshold, &coalescedFrames);
+        if (coalescedFrames > 0) {
+            session->droppedVideoFrames.fetch_add(static_cast<int>(coalescedFrames));
+        }
+        input.droppedVideoFrames = session->droppedVideoFrames.load();
+
         const std::int64_t stageStartNs = steadyClockNowNs();
         const double stageQueueWaitMs =
             input.enqueuedAtNs > 0 ? nsToMs(stageStartNs - input.enqueuedAtNs) : 0.0;
 
         media::VideoFrame publishFrame;
         const std::int64_t prepareStartNs = stageStartNs;
-        Status status = prepareVideoFrameForPublish(session, input.frame, &publishFrame);
+        Status status = prepareVideoFrameForPublish(session, std::move(input.frame), &publishFrame);
         if (!status.ok()) {
             signalPublishFailure(state, session, status, "video publish stopped: ");
             return;

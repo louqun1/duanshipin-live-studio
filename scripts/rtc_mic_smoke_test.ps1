@@ -2,6 +2,8 @@ param(
     [string]$GuestJoinParamsFile = ".\\guest-join.json",
     [string]$ControllerJoinParamsFile = ".\\host-join.json",
     [string]$IceServer = "turn://probe:probe_turn_123@192.168.3.28:3478?transport=udp",
+    [string]$GuestMicCaptureConfig = "",
+    [string]$ControllerMicCaptureConfig = "",
     [int]$MediaRunMs = 5000,
     [int]$TimeoutMs = 60000,
     [switch]$RelayOnly = $true
@@ -35,21 +37,35 @@ $guestOut = Join-Path $logDir "guest.out.log"
 $guestErr = Join-Path $logDir "guest.err.log"
 $controllerOut = Join-Path $logDir "controller.out.log"
 $controllerErr = Join-Path $logDir "controller.err.log"
+$guestRecvWav = Join-Path $logDir "guest-recv.wav"
+$controllerRecvWav = Join-Path $logDir "controller-recv.wav"
 
 $guestArgs = @(
     "--rtc-join-params-file", $GuestJoinParamsFile,
+    "--send-mic",
     "--expect-remote-audio",
+    "--recv-audio-wav", $guestRecvWav,
     "--ice-server", $IceServer,
+    "--media-run-ms", $MediaRunMs,
     "--timeout-ms", $TimeoutMs
 )
 
 $controllerArgs = @(
     "--rtc-join-params-file", $ControllerJoinParamsFile,
     "--send-mic",
+    "--expect-remote-audio",
+    "--recv-audio-wav", $controllerRecvWav,
     "--ice-server", $IceServer,
     "--media-run-ms", $MediaRunMs,
     "--timeout-ms", $TimeoutMs
 )
+
+if ($GuestMicCaptureConfig -ne "") {
+    $guestArgs += @("--mic-capture-config", $GuestMicCaptureConfig)
+}
+if ($ControllerMicCaptureConfig -ne "") {
+    $controllerArgs += @("--mic-capture-config", $ControllerMicCaptureConfig)
+}
 
 if ($RelayOnly) {
     $guestArgs += "--relay-only"
@@ -91,15 +107,26 @@ try {
         throw "guest probe timed out after $waitBudgetMs ms"
     }
 
+    $controllerProcess.Refresh()
+    $guestProcess.Refresh()
+    $controllerExitCode = if ($null -ne $controllerProcess.ExitCode) { [int]$controllerProcess.ExitCode } else { 0 }
+    $guestExitCode = if ($null -ne $guestProcess.ExitCode) { [int]$guestProcess.ExitCode } else { 0 }
     $controllerErrorBytes = if (Test-Path $controllerErr) { (Get-Item $controllerErr).Length } else { 0 }
     $guestErrorBytes = if (Test-Path $guestErr) { (Get-Item $guestErr).Length } else { 0 }
-    $controllerFailed = $controllerErrorBytes -gt 0
-    $guestFailed = $guestErrorBytes -gt 0
+    $guestRecvWavBytes = if (Test-Path $guestRecvWav) { (Get-Item $guestRecvWav).Length } else { 0 }
+    $controllerRecvWavBytes = if (Test-Path $controllerRecvWav) { (Get-Item $controllerRecvWav).Length } else { 0 }
+    $controllerFailed = $controllerExitCode -ne 0 -or $controllerErrorBytes -gt 0
+    $guestFailed = $guestExitCode -ne 0 -or $guestErrorBytes -gt 0 -or $guestRecvWavBytes -le 44
+    $controllerFailed = $controllerFailed -or $controllerRecvWavBytes -le 44
 
     Write-Host "RTC mic smoke test finished."
     Write-Host "  logs: $logDir"
+    Write-Host "  controller exit code: $controllerExitCode"
+    Write-Host "  guest exit code: $guestExitCode"
     Write-Host "  controller error bytes: $controllerErrorBytes"
     Write-Host "  guest error bytes: $guestErrorBytes"
+    Write-Host "  guest recv wav bytes: $guestRecvWavBytes"
+    Write-Host "  controller recv wav bytes: $controllerRecvWavBytes"
 
     if ($controllerFailed -or $guestFailed) {
         Write-Host ""
@@ -108,6 +135,14 @@ try {
         Write-Host ""
         Write-Host "guest tail:"
         Get-Content $guestOut -Tail 40
+        if ($guestRecvWavBytes -le 44) {
+            Write-Host ""
+            Write-Host "guest recv wav missing or empty: $guestRecvWav"
+        }
+        if ($controllerRecvWavBytes -le 44) {
+            Write-Host ""
+            Write-Host "controller recv wav missing or empty: $controllerRecvWav"
+        }
         exit 1
     }
 } finally {
