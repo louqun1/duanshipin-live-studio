@@ -12,6 +12,8 @@
 #include "BusinessLiveTypes.hpp"
 #include "capture/LiveDeviceCaptureSource.hpp"
 #include "linkmic/LinkMicSession.hpp"
+#include "rtc/RtcPeerSession.hpp"
+#include "rtc/RtcSignalingBridge.hpp"
 #include "session/LiveSessionController.hpp"
 
 class QComboBox;
@@ -94,6 +96,10 @@ private:
     void setPanelState(PanelState state);
     void switchToSetupPage();
     void switchToLiveRoomPage();
+    void syncLinkMicTransportFromBusiness();
+    void handleBusinessSignalingMessage(const QJsonObject& message);
+    void ensureRtcSessionForJoinParams();
+    void stopRtcSession(const QString& reason);
 
     void refreshLinkMicPanel();
     void populateAudienceMemberTable();
@@ -104,8 +110,8 @@ private:
 
     [[nodiscard]] live_studio::business::BusinessStartConfig buildBusinessStartConfig() const;
     [[nodiscard]] live_studio::session::LiveSessionConfig buildSessionConfig() const;
-    [[nodiscard]] live_studio::linkmic::LinkMicSessionConfig buildLinkMicSessionConfig() const;
-    [[nodiscard]] QString selectedAudienceMemberId() const;
+    [[nodiscard]] live_studio::linkmic::LinkMicSessionConfig buildBusinessLinkMicSessionConfig() const;
+    [[nodiscard]] live_studio::linkmic::CrossRoomInviteTarget buildInviteTarget() const;
     [[nodiscard]] static QImage videoFrameToImage(const live_studio::media::VideoFrame& frame);
     [[nodiscard]] static QString panelStateText(PanelState state);
     [[nodiscard]] static QString liveRoomStatusText(PanelState state, bool publishing);
@@ -123,6 +129,8 @@ private:
 
     live_studio::session::LiveSessionController controller_;
     live_studio::linkmic::LinkMicSession linkMicSession_;
+    live_studio::rtc::RtcSignalingBridge rtcSignalingBridge_;
+    live_studio::rtc::RtcPeerSession rtcPeerSession_;
     live_studio::business::BusinessLiveClient* businessClient_ = nullptr;
     QFutureWatcher<OperationResult> operationWatcher_;
     QTimer refreshTimer_;
@@ -168,24 +176,24 @@ private:
     QLabel* viewerOnlineCountValueLabel_ = nullptr;
     QTableWidget* audienceMemberTable_ = nullptr;
 
-    QLineEdit* linkMicSignalingUrlEdit_ = nullptr;
-    QLineEdit* linkMicRoomIdEdit_ = nullptr;
-    QLineEdit* linkMicUserIdEdit_ = nullptr;
-    QLineEdit* linkMicDisplayNameEdit_ = nullptr;
-    QComboBox* linkMicRoleCombo_ = nullptr;
-    QPushButton* linkMicConnectButton_ = nullptr;
-    QPushButton* linkMicDisconnectButton_ = nullptr;
+    QLineEdit* linkMicTargetRoomKeyEdit_ = nullptr;
+    QLineEdit* linkMicTargetUserIdEdit_ = nullptr;
     QLabel* linkMicTransportValueLabel_ = nullptr;
     QLabel* linkMicStateValueLabel_ = nullptr;
+    QLabel* linkMicSessionValueLabel_ = nullptr;
     QLabel* linkMicRequestValueLabel_ = nullptr;
+    QLabel* linkMicBusinessRoleValueLabel_ = nullptr;
+    QLabel* linkMicRtcRoleValueLabel_ = nullptr;
     QLabel* linkMicRemoteValueLabel_ = nullptr;
     QLabel* linkMicOnlineValueLabel_ = nullptr;
     QLabel* linkMicRtcCountValueLabel_ = nullptr;
     QLabel* linkMicJoinParamsValueLabel_ = nullptr;
     QLabel* linkMicErrorValueLabel_ = nullptr;
+    QLabel* rtcPeerStateValueLabel_ = nullptr;
+    QLabel* rtcDataChannelValueLabel_ = nullptr;
+    QLabel* rtcPingValueLabel_ = nullptr;
     QTableWidget* linkMicMemberTable_ = nullptr;
     QPushButton* linkMicInviteButton_ = nullptr;
-    QPushButton* linkMicApplyButton_ = nullptr;
     QPushButton* linkMicAcceptButton_ = nullptr;
     QPushButton* linkMicRejectButton_ = nullptr;
     QPushButton* linkMicHangupButton_ = nullptr;

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <optional>
 
+#include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -85,6 +86,12 @@ QString deriveSignalingUrl(const QString& apiBaseUrl) {
     wsUrl.setQuery(QString());
     wsUrl.setFragment(QString());
     return wsUrl.toString(QUrl::FullyEncoded);
+}
+
+bool isLinkMicOrRtcSignalType(const QString& type) {
+    return type == "signal.error" ||
+        type.startsWith("linkmic.") ||
+        type.startsWith("rtc.");
 }
 
 QString messageTypeFromJson(const QJsonObject& object) {
@@ -228,6 +235,10 @@ BusinessLiveClient::BusinessLiveClient(QObject* parent) : QObject(parent) {
 
 BusinessLiveClient::~BusinessLiveClient() {
     shutdown();
+}
+
+bool BusinessLiveClient::sendSignalingEnvelope(const QJsonObject& object) {
+    return sendSocketJsonMessage(object);
 }
 
 void BusinessLiveClient::beginStartSequence(const BusinessStartConfig& config) {
@@ -633,14 +644,21 @@ void BusinessLiveClient::handleSocketTextMessage(const QString& message) {
     }
     if (type == "room.member-list" && object.contains("roomKey")) {
         handleRoomMemberList(object);
+        emit signalingMessageReceived(object);
         return;
     }
     if (type == "room.member-join" && object.contains("roomKey")) {
         handleRoomMemberJoin(object);
+        emit signalingMessageReceived(object);
         return;
     }
     if (type == "room.member-leave" && object.contains("roomKey")) {
         handleRoomMemberLeave(object);
+        emit signalingMessageReceived(object);
+        return;
+    }
+    if (isLinkMicOrRtcSignalType(type)) {
+        emit signalingMessageReceived(object);
     }
 }
 
@@ -883,6 +901,30 @@ QUrl BusinessLiveClient::apiUrlForPath(const QString& path) const {
 bool BusinessLiveClient::shouldReconnect() const {
     return publishingActive_ && !currentRoomKey().isEmpty() && !snapshot_.signalingUrl.trimmed().isEmpty() &&
            !snapshot_.accessToken.trimmed().isEmpty();
+}
+
+bool BusinessLiveClient::sendSocketJsonMessage(const QJsonObject& object) {
+    if (socket_.state() != QAbstractSocket::ConnectedState) {
+        spdlog::warn("[business-ws] send skipped type={} reason=socket-not-connected",
+                     toStdString(messageTypeFromJson(object)));
+        return false;
+    }
+
+    const QString payload = QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
+    if (socket_.sendTextMessage(payload) < 0) {
+        spdlog::error("[business-ws] send failed type={} error={}",
+                      toStdString(messageTypeFromJson(object)),
+                      toStdString(socket_.errorString()));
+        return false;
+    }
+
+    spdlog::info("[business-ws] send type={} roomKey={} from={} to={} requestId={}",
+                 toStdString(messageTypeFromJson(object)),
+                 toStdString(firstNonEmptyString(object, {"fromRoomKey", "from_room_key", "roomKey", "room_key"})),
+                 toStdString(firstNonEmptyString(object, {"fromUserId", "from_user_id"})),
+                 toStdString(firstNonEmptyString(object, {"toUserId", "to_user_id"})),
+                 toStdString(firstNonEmptyString(object, {"requestId", "request_id"})));
+    return true;
 }
 
 BusinessLiveClient::ParsedReply BusinessLiveClient::parseReply(QNetworkReply* reply) {

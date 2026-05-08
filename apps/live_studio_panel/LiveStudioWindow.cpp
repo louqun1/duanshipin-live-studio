@@ -21,6 +21,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QPlainTextEdit>
 #include <QPixmap>
 #include <QPushButton>
@@ -154,6 +155,43 @@ LiveStudioWindow::LiveStudioWindow(QWidget* parent) : QMainWindow(parent) {
     linkMicSession_.setUpdateHandler([this]() {
         refreshLinkMicPanel();
     });
+    linkMicSession_.setExternalMessageSender([this](const QJsonObject& envelope) {
+        return businessClient_ != nullptr && businessClient_->sendSignalingEnvelope(envelope);
+    });
+    linkMicSession_.setUseExternalTransport(true);
+
+    live_studio::rtc::RtcPeerSession::Callbacks rtcCallbacks;
+    rtcCallbacks.onLocalDescription = [this](const QString& sdp, const QString& descriptionType) {
+        rtcSignalingBridge_.sendLocalDescription(sdp, descriptionType);
+    };
+    rtcCallbacks.onLocalIceCandidate = [this](const QString& candidate, const QString& mid) {
+        rtcSignalingBridge_.sendLocalIceCandidate(candidate, mid);
+    };
+    rtcCallbacks.onPeerConnectionConnected = [this]() {
+        QMetaObject::invokeMethod(
+            this,
+            [this]() {
+                linkMicSession_.noteRtcConnected();
+                rtcSignalingBridge_.sendConnected();
+                refreshLinkMicPanel();
+            },
+            Qt::QueuedConnection);
+    };
+    rtcPeerSession_.setCallbacks(std::move(rtcCallbacks));
+
+    live_studio::rtc::RtcSignalingBridge::Callbacks bridgeCallbacks;
+    bridgeCallbacks.onRemoteDescription = [this](const QString& sdp, const QString& descriptionType) {
+        rtcPeerSession_.applyRemoteDescription(sdp, descriptionType);
+    };
+    bridgeCallbacks.onRemoteIceCandidate = [this](const QString& candidate, const QString& mid) {
+        rtcPeerSession_.addRemoteCandidate(candidate, mid);
+    };
+    bridgeCallbacks.onWarning = [this](const QString& message) {
+        if (!message.trimmed().isEmpty()) {
+            showInfoPrompt(message, false);
+        }
+    };
+    rtcSignalingBridge_.setCallbacks(std::move(bridgeCallbacks));
 
     connect(&operationWatcher_, &QFutureWatcher<OperationResult>::finished, this, [this]() {
         handleOperationFinished();
@@ -173,6 +211,9 @@ LiveStudioWindow::LiveStudioWindow(QWidget* parent) : QMainWindow(parent) {
     connect(businessClient_, &live_studio::business::BusinessLiveClient::errorRaised, this, [this](const QString& message) {
         showErrorPrompt(message);
     });
+    connect(businessClient_, &live_studio::business::BusinessLiveClient::signalingMessageReceived, this, [this](const QJsonObject& message) {
+        handleBusinessSignalingMessage(message);
+    });
 
     refreshTimer_.start(kRefreshIntervalMs);
     beginDeviceProbe();
@@ -189,6 +230,7 @@ LiveStudioWindow::~LiveStudioWindow() {
         businessClient_->shutdown();
     }
     linkMicSession_.disconnectFromRoom();
+    stopRtcSession("window closing");
     controller_.close();
 }
 
@@ -201,6 +243,7 @@ void LiveStudioWindow::closeEvent(QCloseEvent* event) {
         businessClient_->shutdown();
     }
     linkMicSession_.disconnectFromRoom();
+    stopRtcSession("window closing");
     controller_.close();
     QMainWindow::closeEvent(event);
 }
@@ -354,35 +397,10 @@ void LiveStudioWindow::buildUi() {
         });
     });
 
-    connect(linkMicConnectButton_, &QPushButton::clicked, this, [this]() {
-        const auto config = buildLinkMicSessionConfig();
-        if (!config.isValid()) {
-            showErrorPrompt("LinkMic signaling config is incomplete.");
-            return;
-        }
-        if (!linkMicSession_.connectToRoom(config)) {
-            showErrorPrompt("Failed to initialize the stage1 signaling session.");
-            return;
-        }
-        statusBar()->showMessage("Stage1 signaling connect requested.", 3000);
-    });
-
-    connect(linkMicDisconnectButton_, &QPushButton::clicked, this, [this]() {
-        linkMicSession_.disconnectFromRoom();
-        statusBar()->showMessage("Stage1 signaling disconnected.", 3000);
-    });
-
     connect(linkMicInviteButton_, &QPushButton::clicked, this, [this]() {
-        const QString targetUserId = selectedAudienceMemberId();
-        if (!linkMicSession_.invite(targetUserId)) {
+        const auto target = buildInviteTarget();
+        if (!linkMicSession_.invite(target.roomKey, target.userId)) {
             showInfoPrompt("Invite is unavailable in the current state.");
-        }
-    });
-
-    connect(linkMicApplyButton_, &QPushButton::clicked, this, [this]() {
-        const QString targetUserId = selectedAudienceMemberId();
-        if (!linkMicSession_.apply(targetUserId)) {
-            showInfoPrompt("Apply is unavailable in the current state.");
         }
     });
 
@@ -401,29 +419,16 @@ void LiveStudioWindow::buildUi() {
     connect(linkMicHangupButton_, &QPushButton::clicked, this, [this]() {
         if (!linkMicSession_.hangup()) {
             showInfoPrompt("Hangup is unavailable in the current state.");
+            return;
         }
+        stopRtcSession("manual hangup");
     });
 
-    connect(linkMicRoleCombo_, &QComboBox::currentTextChanged, this, [this](const QString& roleText) {
-        if (linkMicUserIdEdit_ != nullptr &&
-            (linkMicUserIdEdit_->text().trimmed().isEmpty() ||
-             linkMicUserIdEdit_->text() == "controller-panel" ||
-             linkMicUserIdEdit_->text() == "guest-panel")) {
-            linkMicUserIdEdit_->setText(roleText == "guest" ? "guest-panel" : "controller-panel");
-        }
-
-        if (linkMicDisplayNameEdit_ != nullptr &&
-            (linkMicDisplayNameEdit_->text().trimmed().isEmpty() ||
-             linkMicDisplayNameEdit_->text() == "Controller Panel" ||
-             linkMicDisplayNameEdit_->text() == "Guest Panel")) {
-            linkMicDisplayNameEdit_->setText(roleText == "guest" ? "Guest Panel" : "Controller Panel");
-        }
-
-        refreshLinkMicPanel();
-    });
-
-    connect(audienceMemberTable_, &QTableWidget::itemSelectionChanged, this, [this]() {
+    connect(linkMicTargetRoomKeyEdit_, &QLineEdit::textChanged, this, [this](const QString&) {
         updateLinkMicActionButtons();
+    });
+    connect(linkMicTargetUserIdEdit_, &QLineEdit::textChanged, this, [this](const QString&) {
+        refreshLinkMicPanel();
     });
 
     refreshViewerInfo();
@@ -601,56 +606,31 @@ QGroupBox* LiveStudioWindow::buildPublishConfigGroup(QWidget* parent) {
 }
 
 QGroupBox* LiveStudioWindow::buildSignalingConfigGroup(QWidget* parent) {
-    auto* group = new QGroupBox("RTC Probe Signaling Config", parent);
+    auto* group = new QGroupBox("Cross-Room Anchor LinkMic", parent);
     auto* layout = new QGridLayout(group);
     layout->setHorizontalSpacing(10);
     layout->setVerticalSpacing(10);
-    layout->setColumnStretch(6, 1);
+    layout->setColumnStretch(3, 1);
 
-    linkMicSignalingUrlEdit_ = new QLineEdit(group);
-    linkMicSignalingUrlEdit_->setText("ws://192.168.3.28:8080/ws");
-    linkMicSignalingUrlEdit_->setMaximumWidth(480);
+    linkMicTargetRoomKeyEdit_ = new QLineEdit(group);
+    linkMicTargetRoomKeyEdit_->setPlaceholderText("target anchor roomKey");
+    linkMicTargetRoomKeyEdit_->setMaximumWidth(260);
 
-    linkMicRoomIdEdit_ = new QLineEdit(group);
-    linkMicRoomIdEdit_->setText("stage1");
-    linkMicRoomIdEdit_->setMaximumWidth(240);
+    linkMicTargetUserIdEdit_ = new QLineEdit(group);
+    linkMicTargetUserIdEdit_->setPlaceholderText("target anchor userId");
+    linkMicTargetUserIdEdit_->setMaximumWidth(220);
 
-    linkMicUserIdEdit_ = new QLineEdit(group);
-    linkMicUserIdEdit_->setText("controller-panel");
-    linkMicUserIdEdit_->setMaximumWidth(240);
+    layout->addWidget(new QLabel("Target Room Key", group), 0, 0);
+    layout->addWidget(linkMicTargetRoomKeyEdit_, 0, 1);
+    layout->addWidget(new QLabel("Target User ID", group), 0, 2);
+    layout->addWidget(linkMicTargetUserIdEdit_, 0, 3);
 
-    linkMicDisplayNameEdit_ = new QLineEdit(group);
-    linkMicDisplayNameEdit_->setText("Controller Panel");
-    linkMicDisplayNameEdit_->setMaximumWidth(240);
-
-    linkMicRoleCombo_ = new QComboBox(group);
-    linkMicRoleCombo_->addItem("controller");
-    linkMicRoleCombo_->addItem("guest");
-    linkMicRoleCombo_->setMaximumWidth(180);
-
-    linkMicConnectButton_ = new QPushButton("Connect", group);
-    linkMicConnectButton_->setObjectName("primaryButton");
-    linkMicConnectButton_->setMinimumWidth(120);
-
-    linkMicDisconnectButton_ = new QPushButton("Disconnect", group);
-    linkMicDisconnectButton_->setObjectName("dangerButton");
-    linkMicDisconnectButton_->setMinimumWidth(120);
-
-    layout->addWidget(new QLabel("Signaling URL", group), 0, 0);
-    layout->addWidget(linkMicSignalingUrlEdit_, 0, 1, 1, 3);
-
-    layout->addWidget(new QLabel("Probe Room ID", group), 1, 0);
-    layout->addWidget(linkMicRoomIdEdit_, 1, 1);
-    layout->addWidget(new QLabel("User ID", group), 1, 2);
-    layout->addWidget(linkMicUserIdEdit_, 1, 3);
-
-    layout->addWidget(new QLabel("Display Name", group), 2, 0);
-    layout->addWidget(linkMicDisplayNameEdit_, 2, 1);
-    layout->addWidget(new QLabel("Role", group), 2, 2);
-    layout->addWidget(linkMicRoleCombo_, 2, 3);
-
-    layout->addWidget(linkMicConnectButton_, 3, 1);
-    layout->addWidget(linkMicDisconnectButton_, 3, 2);
+    auto* hintLabel = new QLabel(
+        "Cross-room invites are sent through the live anchor business WebSocket. "
+        "Do not select members from the current room: enter the remote anchor's roomKey and userId directly.",
+        group);
+    hintLabel->setWordWrap(true);
+    layout->addWidget(hintLabel, 1, 0, 1, 4);
 
     return group;
 }
@@ -713,24 +693,42 @@ QWidget* LiveStudioWindow::buildLiveRoomSidebar(QWidget* parent) {
     stateLayout->addWidget(new QLabel("Signal State", stateGroup), 0, 2);
     linkMicStateValueLabel_ = makeCardValueLabel(stateGroup);
     stateLayout->addWidget(linkMicStateValueLabel_, 0, 3);
-    stateLayout->addWidget(new QLabel("Request ID", stateGroup), 1, 0);
+    stateLayout->addWidget(new QLabel("Session ID", stateGroup), 1, 0);
+    linkMicSessionValueLabel_ = makeCardValueLabel(stateGroup);
+    stateLayout->addWidget(linkMicSessionValueLabel_, 1, 1);
+    stateLayout->addWidget(new QLabel("Request ID", stateGroup), 1, 2);
     linkMicRequestValueLabel_ = makeCardValueLabel(stateGroup);
-    stateLayout->addWidget(linkMicRequestValueLabel_, 1, 1);
-    stateLayout->addWidget(new QLabel("Remote User", stateGroup), 1, 2);
+    stateLayout->addWidget(linkMicRequestValueLabel_, 1, 3);
+    stateLayout->addWidget(new QLabel("Business Role", stateGroup), 2, 0);
+    linkMicBusinessRoleValueLabel_ = makeCardValueLabel(stateGroup);
+    stateLayout->addWidget(linkMicBusinessRoleValueLabel_, 2, 1);
+    stateLayout->addWidget(new QLabel("RTC Role", stateGroup), 2, 2);
+    linkMicRtcRoleValueLabel_ = makeCardValueLabel(stateGroup);
+    stateLayout->addWidget(linkMicRtcRoleValueLabel_, 2, 3);
+    stateLayout->addWidget(new QLabel("Remote Anchor", stateGroup), 3, 0);
     linkMicRemoteValueLabel_ = makeCardValueLabel(stateGroup);
-    stateLayout->addWidget(linkMicRemoteValueLabel_, 1, 3);
-    stateLayout->addWidget(new QLabel("Audience Count", stateGroup), 2, 0);
+    stateLayout->addWidget(linkMicRemoteValueLabel_, 3, 1, 1, 3);
+    stateLayout->addWidget(new QLabel("Current Room Members", stateGroup), 4, 0);
     linkMicOnlineValueLabel_ = makeCardValueLabel(stateGroup);
-    stateLayout->addWidget(linkMicOnlineValueLabel_, 2, 1);
-    stateLayout->addWidget(new QLabel("RTC Count", stateGroup), 2, 2);
+    stateLayout->addWidget(linkMicOnlineValueLabel_, 4, 1);
+    stateLayout->addWidget(new QLabel("RTC Count", stateGroup), 4, 2);
     linkMicRtcCountValueLabel_ = makeCardValueLabel(stateGroup);
-    stateLayout->addWidget(linkMicRtcCountValueLabel_, 2, 3);
-    stateLayout->addWidget(new QLabel("Join Params", stateGroup), 3, 0);
+    stateLayout->addWidget(linkMicRtcCountValueLabel_, 4, 3);
+    stateLayout->addWidget(new QLabel("Join Params", stateGroup), 5, 0);
     linkMicJoinParamsValueLabel_ = makeCardValueLabel(stateGroup);
-    stateLayout->addWidget(linkMicJoinParamsValueLabel_, 3, 1, 1, 3);
-    stateLayout->addWidget(new QLabel("Last Error", stateGroup), 4, 0);
+    stateLayout->addWidget(linkMicJoinParamsValueLabel_, 5, 1, 1, 3);
+    stateLayout->addWidget(new QLabel("RTC Peer", stateGroup), 6, 0);
+    rtcPeerStateValueLabel_ = makeCardValueLabel(stateGroup);
+    stateLayout->addWidget(rtcPeerStateValueLabel_, 6, 1);
+    stateLayout->addWidget(new QLabel("DataChannel", stateGroup), 6, 2);
+    rtcDataChannelValueLabel_ = makeCardValueLabel(stateGroup);
+    stateLayout->addWidget(rtcDataChannelValueLabel_, 6, 3);
+    stateLayout->addWidget(new QLabel("Ping / Pong", stateGroup), 7, 0);
+    rtcPingValueLabel_ = makeCardValueLabel(stateGroup);
+    stateLayout->addWidget(rtcPingValueLabel_, 7, 1, 1, 3);
+    stateLayout->addWidget(new QLabel("Last Error", stateGroup), 8, 0);
     linkMicErrorValueLabel_ = makeCardValueLabel(stateGroup);
-    stateLayout->addWidget(linkMicErrorValueLabel_, 4, 1, 1, 3);
+    stateLayout->addWidget(linkMicErrorValueLabel_, 8, 1, 1, 3);
 
     auto* viewersGroup = new QGroupBox("Live Room Audience", sidebar);
     auto* viewersLayout = new QGridLayout(viewersGroup);
@@ -757,29 +755,11 @@ QWidget* LiveStudioWindow::buildLiveRoomSidebar(QWidget* parent) {
     audienceMemberTable_->setMinimumHeight(180);
     viewersLayout->addWidget(audienceMemberTable_, 1, 0, 1, 2);
 
-    auto* audienceActionLayout = new QGridLayout();
-    audienceActionLayout->setHorizontalSpacing(8);
-    audienceActionLayout->setVerticalSpacing(8);
-
     linkMicInviteButton_ = new QPushButton("Invite", viewersGroup);
     linkMicInviteButton_->setObjectName("primaryButton");
-    linkMicApplyButton_ = new QPushButton("Apply", viewersGroup);
-    linkMicApplyButton_->setObjectName("secondaryButton");
-
-    const std::array<QPushButton*, 2> audienceButtons = {
-        linkMicInviteButton_,
-        linkMicApplyButton_,
-    };
-    for (QPushButton* button : audienceButtons) {
-        button->setMinimumWidth(120);
-        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    }
-
-    audienceActionLayout->setColumnStretch(0, 1);
-    audienceActionLayout->setColumnStretch(1, 1);
-    audienceActionLayout->addWidget(linkMicInviteButton_, 0, 0);
-    audienceActionLayout->addWidget(linkMicApplyButton_, 0, 1);
-    viewersLayout->addLayout(audienceActionLayout, 2, 0, 1, 2);
+    linkMicInviteButton_->setMinimumWidth(120);
+    linkMicInviteButton_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    viewersLayout->addWidget(linkMicInviteButton_, 2, 0, 1, 2);
 
     auto* membersGroup = new QGroupBox("RTC LinkMic Members", sidebar);
     auto* membersLayout = new QVBoxLayout(membersGroup);
@@ -984,6 +964,7 @@ void LiveStudioWindow::handleBusinessStateChanged() {
     if (businessClient_ != nullptr) {
         businessSnapshot_ = businessClient_->snapshot();
     }
+    syncLinkMicTransportFromBusiness();
     const auto diagnostics = controller_.diagnostics();
 
     if (!diagnostics.publishing) {
@@ -1194,6 +1175,129 @@ void LiveStudioWindow::refreshBusinessStatus() {
     updateStatusSummary(diagnostics);
     refreshViewerInfo();
     updateButtonStates();
+}
+
+void LiveStudioWindow::syncLinkMicTransportFromBusiness() {
+    const bool hasBusinessIdentity = businessSnapshot_.userId > 0 &&
+        !businessSnapshot_.roomKey.trimmed().isEmpty() &&
+        !businessSnapshot_.signalingUrl.trimmed().isEmpty();
+
+    if (!hasBusinessIdentity) {
+        if (linkMicSession_.usesExternalTransport()) {
+            linkMicSession_.disconnectFromRoom();
+        }
+        stopRtcSession("business identity unavailable");
+        return;
+    }
+
+    const live_studio::linkmic::LinkMicSessionConfig businessConfig = buildBusinessLinkMicSessionConfig();
+    const bool configChanged =
+        linkMicSession_.config().signalingUrl != businessConfig.signalingUrl ||
+        linkMicSession_.config().roomKey != businessConfig.roomKey ||
+        linkMicSession_.config().userId != businessConfig.userId ||
+        linkMicSession_.config().displayName != businessConfig.displayName;
+
+    if (configChanged) {
+        linkMicSession_.connectToRoom(businessConfig);
+    }
+
+    if (businessSnapshot_.anchorJoined) {
+        linkMicSession_.setExternalTransportState(
+            live_studio::linkmic::SignalingConnectionState::connected,
+            "business websocket joined the live room");
+        return;
+    }
+
+    if (businessSnapshot_.businessWsConnected) {
+        linkMicSession_.setExternalTransportState(
+            live_studio::linkmic::SignalingConnectionState::connecting,
+            "business websocket connected, waiting for live.anchor.joined");
+        return;
+    }
+
+    const live_studio::linkmic::SignalingConnectionState state =
+        live_studio::linkmic::SignalingConnectionState::disconnected;
+    const QString detail =
+        businessSnapshot_.state == live_studio::business::BusinessLiveState::reconnecting
+        ? QString("business websocket reconnecting")
+        : QString("business websocket is offline");
+    linkMicSession_.setExternalTransportState(state, detail);
+    if (state == live_studio::linkmic::SignalingConnectionState::disconnected) {
+        stopRtcSession(detail);
+    }
+}
+
+void LiveStudioWindow::handleBusinessSignalingMessage(const QJsonObject& message) {
+    if (linkMicSession_.usesExternalTransport()) {
+        linkMicSession_.processExternalMessage(message);
+    }
+
+    if (rtcSignalingBridge_.isActive()) {
+        rtcSignalingBridge_.handleIncomingMessage(message);
+    }
+
+    const QString type = message.value("type").toString().trimmed();
+    if (type == "rtc.join-params") {
+        ensureRtcSessionForJoinParams();
+        return;
+    }
+
+    if (type == "linkmic.reject" || type == "linkmic.cancel" ||
+        type == "linkmic.hangup" || type == "linkmic.kick") {
+        stopRtcSession(type);
+    }
+}
+
+void LiveStudioWindow::ensureRtcSessionForJoinParams() {
+    const auto& roomState = linkMicSession_.roomState();
+    if (!roomState.hasJoinParams()) {
+        return;
+    }
+
+    const auto& joinParams = roomState.joinParams();
+    if (rtcSignalingBridge_.isActive() && rtcSignalingBridge_.sessionId() == joinParams.sessionId) {
+        return;
+    }
+
+    stopRtcSession("starting new rtc session");
+
+    live_studio::rtc::RtcSessionConfig config;
+    config.sessionId = joinParams.sessionId;
+    config.requestId = joinParams.requestId;
+    config.roomAKey = joinParams.roomAKey;
+    config.roomBKey = joinParams.roomBKey;
+    config.selfRoomKey = joinParams.selfRoomKey.trimmed().isEmpty() ? businessSnapshot_.roomKey : joinParams.selfRoomKey;
+    config.peerRoomKey = joinParams.peerRoomKey;
+    config.selfUserId = joinParams.selfUserId.trimmed().isEmpty()
+        ? QString::number(businessSnapshot_.userId)
+        : joinParams.selfUserId;
+    config.peerUserId = joinParams.peerUserId;
+    config.businessRole = joinParams.businessRole;
+    config.rtcRole = joinParams.rtcRole;
+    config.signalingUrl = QUrl::fromUserInput(joinParams.signalingUrl.trimmed().isEmpty()
+                                                  ? businessSnapshot_.signalingUrl
+                                                  : joinParams.signalingUrl);
+    config.iceServers = joinParams.iceServers;
+    config.rtcBackend = joinParams.rtcBackend;
+    config.mediaMode = joinParams.mediaMode;
+
+    const bool bridgeStarted = rtcSignalingBridge_.start(
+        config,
+        [this](const QJsonObject& envelope) {
+            return businessClient_ != nullptr && businessClient_->sendSignalingEnvelope(envelope);
+        });
+    if (!bridgeStarted || !rtcPeerSession_.start(config)) {
+        stopRtcSession("failed to start libdatachannel peer session");
+        showErrorPrompt("Failed to start the cross-room libdatachannel session.");
+        return;
+    }
+
+    refreshLinkMicPanel();
+}
+
+void LiveStudioWindow::stopRtcSession(const QString& reason) {
+    rtcSignalingBridge_.stop();
+    rtcPeerSession_.stop(reason);
 }
 
 void LiveStudioWindow::switchToSetupPage() {
@@ -1410,7 +1514,7 @@ void LiveStudioWindow::setPanelState(PanelState state) {
 
 void LiveStudioWindow::refreshLinkMicPanel() {
     const auto& roomState = linkMicSession_.roomState();
-    const auto& memberDirectory = linkMicSession_.memberDirectory();
+    const auto rtcSnapshot = rtcPeerSession_.snapshot();
     int audienceCount = 0;
     for (const auto& member : businessSnapshot_.members) {
         if (isAudienceMember(businessSnapshot_, member)) {
@@ -1420,6 +1524,11 @@ void LiveStudioWindow::refreshLinkMicPanel() {
 
     if (linkMicTransportValueLabel_ != nullptr) {
         QString transportText = live_studio::linkmic::connectionStateText(roomState.connectionState());
+        if (linkMicSession_.usesExternalTransport()) {
+            transportText = "business-ws | " + transportText;
+        } else {
+            transportText = "debug-probe | " + transportText;
+        }
         if (roomState.isRegistered() && roomState.connectionState() == live_studio::linkmic::SignalingConnectionState::connected) {
             transportText += " | registered";
         }
@@ -1428,17 +1537,31 @@ void LiveStudioWindow::refreshLinkMicPanel() {
     if (linkMicStateValueLabel_ != nullptr) {
         linkMicStateValueLabel_->setText(fallbackText(roomState.signalState()));
     }
+    if (linkMicSessionValueLabel_ != nullptr) {
+        linkMicSessionValueLabel_->setText(fallbackText(roomState.activeSessionId()));
+    }
     if (linkMicRequestValueLabel_ != nullptr) {
         linkMicRequestValueLabel_->setText(fallbackText(roomState.activeRequestId()));
     }
+    if (linkMicBusinessRoleValueLabel_ != nullptr) {
+        linkMicBusinessRoleValueLabel_->setText(fallbackText(roomState.businessRole()));
+    }
+    if (linkMicRtcRoleValueLabel_ != nullptr) {
+        linkMicRtcRoleValueLabel_->setText(fallbackText(roomState.rtcRole()));
+    }
     if (linkMicRemoteValueLabel_ != nullptr) {
-        linkMicRemoteValueLabel_->setText(fallbackText(roomState.remoteUserId()));
+        const QString remoteText = roomState.remoteRoomKey().trimmed().isEmpty()
+            ? roomState.remoteUserId()
+            : QString("%1 @ %2").arg(fallbackText(roomState.remoteUserId()), roomState.remoteRoomKey());
+        linkMicRemoteValueLabel_->setText(fallbackText(remoteText));
     }
     if (linkMicOnlineValueLabel_ != nullptr) {
         linkMicOnlineValueLabel_->setText(QString::number(audienceCount));
     }
     if (linkMicRtcCountValueLabel_ != nullptr) {
-        linkMicRtcCountValueLabel_->setText(QString::number(rtcLinkMicMemberCount(memberDirectory)));
+        const int rtcCount = roomState.activeSessionId().trimmed().isEmpty() ? 0 :
+            (roomState.remoteUserId().trimmed().isEmpty() ? 1 : 2);
+        linkMicRtcCountValueLabel_->setText(QString::number(rtcCount));
     }
     if (linkMicJoinParamsValueLabel_ != nullptr) {
         QString joinText = "--";
@@ -1450,7 +1573,24 @@ void LiveStudioWindow::refreshLinkMicPanel() {
         linkMicJoinParamsValueLabel_->setText(joinText);
     }
     if (linkMicErrorValueLabel_ != nullptr) {
-        linkMicErrorValueLabel_->setText(fallbackText(roomState.lastError()));
+        const QString errorText = roomState.lastError().trimmed().isEmpty()
+            ? rtcSnapshot.lastError
+            : roomState.lastError();
+        linkMicErrorValueLabel_->setText(fallbackText(errorText));
+    }
+    if (rtcPeerStateValueLabel_ != nullptr) {
+        rtcPeerStateValueLabel_->setText(live_studio::rtc::rtcTransportStateText(rtcSnapshot.transportState));
+    }
+    if (rtcDataChannelValueLabel_ != nullptr) {
+        rtcDataChannelValueLabel_->setText(live_studio::rtc::rtcDataChannelStateText(rtcSnapshot.dataChannelState));
+    }
+    if (rtcPingValueLabel_ != nullptr) {
+        const QString pingText = QString("ping sent=%1 recv=%2 | pong sent=%3 recv=%4")
+                                     .arg(rtcSnapshot.pingSentCount)
+                                     .arg(rtcSnapshot.pingReceivedCount)
+                                     .arg(rtcSnapshot.pongSentCount)
+                                     .arg(rtcSnapshot.pongReceivedCount);
+        rtcPingValueLabel_->setText(pingText);
     }
 
     populateLinkMicMemberTable();
@@ -1464,7 +1604,6 @@ void LiveStudioWindow::populateAudienceMemberTable() {
         return;
     }
 
-    const QString selectedUserId = selectedAudienceMemberId();
     int rowCount = 0;
     for (const auto& member : businessSnapshot_.members) {
         if (isAudienceMember(businessSnapshot_, member)) {
@@ -1494,16 +1633,6 @@ void LiveStudioWindow::populateAudienceMemberTable() {
         audienceMemberTable_->setItem(row, 3, statusItem);
         ++row;
     }
-
-    if (!selectedUserId.isEmpty()) {
-        for (int currentRow = 0; currentRow < audienceMemberTable_->rowCount(); ++currentRow) {
-            if (audienceMemberTable_->item(currentRow, 0) != nullptr &&
-                audienceMemberTable_->item(currentRow, 0)->data(Qt::UserRole).toString() == selectedUserId) {
-                audienceMemberTable_->selectRow(currentRow);
-                break;
-            }
-        }
-    }
 }
 
 void LiveStudioWindow::populateLinkMicMemberTable() {
@@ -1511,33 +1640,38 @@ void LiveStudioWindow::populateLinkMicMemberTable() {
         return;
     }
 
-    const auto& members = linkMicSession_.memberDirectory().members();
     const QSignalBlocker blocker(linkMicMemberTable_);
-    linkMicMemberTable_->setRowCount(rtcLinkMicMemberCount(linkMicSession_.memberDirectory()));
+    const auto& roomState = linkMicSession_.roomState();
+    const bool hasSession = !roomState.activeSessionId().trimmed().isEmpty();
+    const int rowCount = hasSession ? (roomState.remoteUserId().trimmed().isEmpty() ? 1 : 2) : 0;
+    linkMicMemberTable_->setRowCount(rowCount);
 
-    int row = 0;
-    for (const auto& member : members) {
-        // Stage1 currently exposes RTC presence through inLinkMic flags.
-        // When we later support multi-user RTC, replace this with the real RTC participant roster.
-        if (!member.inLinkMic) {
-            continue;
-        }
-
-        auto* userIdItem = new QTableWidgetItem(member.userId);
-        if (member.userId == linkMicSession_.config().userId) {
-            userIdItem->setText(member.userId + " (you)");
-        }
-        userIdItem->setData(Qt::UserRole, member.userId);
-        auto* displayItem = new QTableWidgetItem(live_studio::linkmic::displayNameForMember(member));
-        auto* roleItem = new QTableWidgetItem(fallbackText(member.role, member.userId == linkMicSession_.config().userId ? "local" : "viewer"));
-        auto* statusItem = new QTableWidgetItem(roleSummary(member));
-
-        linkMicMemberTable_->setItem(row, 0, userIdItem);
-        linkMicMemberTable_->setItem(row, 1, displayItem);
-        linkMicMemberTable_->setItem(row, 2, roleItem);
-        linkMicMemberTable_->setItem(row, 3, statusItem);
-        ++row;
+    if (!hasSession) {
+        return;
     }
+
+    auto* localUserIdItem = new QTableWidgetItem(linkMicSession_.config().userId + " (you)");
+    auto* localDisplayItem = new QTableWidgetItem(fallbackText(linkMicSession_.config().displayName, linkMicSession_.config().userId));
+    auto* localRoleItem = new QTableWidgetItem(fallbackText(roomState.businessRole(), "local-anchor"));
+    auto* localStatusItem = new QTableWidgetItem("local-room=" + fallbackText(linkMicSession_.config().roomKey));
+    linkMicMemberTable_->setItem(0, 0, localUserIdItem);
+    linkMicMemberTable_->setItem(0, 1, localDisplayItem);
+    linkMicMemberTable_->setItem(0, 2, localRoleItem);
+    linkMicMemberTable_->setItem(0, 3, localStatusItem);
+
+    if (rowCount < 2) {
+        return;
+    }
+
+    auto* remoteUserIdItem = new QTableWidgetItem(roomState.remoteUserId());
+    auto* remoteDisplayItem = new QTableWidgetItem(roomState.remoteUserId());
+    auto* remoteRoleItem = new QTableWidgetItem(
+        roomState.businessRole() == "inviter" ? "invitee" : "inviter");
+    auto* remoteStatusItem = new QTableWidgetItem("remote-room=" + fallbackText(roomState.remoteRoomKey()));
+    linkMicMemberTable_->setItem(1, 0, remoteUserIdItem);
+    linkMicMemberTable_->setItem(1, 1, remoteDisplayItem);
+    linkMicMemberTable_->setItem(1, 2, remoteRoleItem);
+    linkMicMemberTable_->setItem(1, 3, remoteStatusItem);
 }
 
 void LiveStudioWindow::renderLinkMicEventLog() {
@@ -1563,51 +1697,24 @@ void LiveStudioWindow::renderLinkMicEventLog() {
 }
 
 void LiveStudioWindow::updateLinkMicConnectionControls() {
-    const auto connectionState = linkMicSession_.roomState().connectionState();
-    const bool busy = connectionState == live_studio::linkmic::SignalingConnectionState::connecting ||
-        connectionState == live_studio::linkmic::SignalingConnectionState::connected;
-
-    const auto config = buildLinkMicSessionConfig();
-    if (linkMicSignalingUrlEdit_ != nullptr) {
-        linkMicSignalingUrlEdit_->setEnabled(!busy);
+    const bool anchorReady = businessSnapshot_.anchorJoined;
+    if (linkMicTargetRoomKeyEdit_ != nullptr) {
+        linkMicTargetRoomKeyEdit_->setEnabled(anchorReady);
     }
-    if (linkMicRoomIdEdit_ != nullptr) {
-        linkMicRoomIdEdit_->setEnabled(!busy);
-    }
-    if (linkMicUserIdEdit_ != nullptr) {
-        linkMicUserIdEdit_->setEnabled(!busy);
-    }
-    if (linkMicDisplayNameEdit_ != nullptr) {
-        linkMicDisplayNameEdit_->setEnabled(!busy);
-    }
-    if (linkMicRoleCombo_ != nullptr) {
-        linkMicRoleCombo_->setEnabled(!busy);
-    }
-    if (linkMicConnectButton_ != nullptr) {
-        linkMicConnectButton_->setEnabled(!busy && config.isValid());
-    }
-    if (linkMicDisconnectButton_ != nullptr) {
-        linkMicDisconnectButton_->setEnabled(busy);
+    if (linkMicTargetUserIdEdit_ != nullptr) {
+        linkMicTargetUserIdEdit_->setEnabled(anchorReady);
     }
 }
 
 void LiveStudioWindow::updateLinkMicActionButtons() {
-    const QString selectedUserId = selectedAudienceMemberId();
-    const auto selectedMember = linkMicSession_.memberDirectory().memberById(selectedUserId);
-    const bool selectedInLinkMic = selectedMember.has_value() && selectedMember->inLinkMic;
-    const QString localBusinessUserId =
-        businessSnapshot_.userId > 0 ? QString::number(businessSnapshot_.userId) : QString();
-    const bool selectedIsLocal = !selectedUserId.isEmpty() &&
-        (selectedUserId == linkMicSession_.config().userId || selectedUserId == localBusinessUserId);
+    const auto target = buildInviteTarget();
     const auto& roomState = linkMicSession_.roomState();
 
     if (linkMicInviteButton_ != nullptr) {
-        linkMicInviteButton_->setEnabled(!selectedIsLocal &&
-            roomState.canInvite(selectedUserId, selectedInLinkMic));
-    }
-    if (linkMicApplyButton_ != nullptr) {
-        linkMicApplyButton_->setEnabled(!selectedIsLocal &&
-            roomState.canApply(selectedUserId, selectedInLinkMic));
+        linkMicInviteButton_->setEnabled(roomState.canInvite(linkMicSession_.config().roomKey,
+                                                             linkMicSession_.config().userId,
+                                                             target.roomKey,
+                                                             target.userId));
     }
     if (linkMicAcceptButton_ != nullptr) {
         linkMicAcceptButton_->setEnabled(roomState.canAccept());
@@ -1652,34 +1759,21 @@ live_studio::session::LiveSessionConfig LiveStudioWindow::buildSessionConfig() c
     return config;
 }
 
-live_studio::linkmic::LinkMicSessionConfig LiveStudioWindow::buildLinkMicSessionConfig() const {
+live_studio::linkmic::LinkMicSessionConfig LiveStudioWindow::buildBusinessLinkMicSessionConfig() const {
     live_studio::linkmic::LinkMicSessionConfig config;
-    config.signalingUrl = QUrl::fromUserInput(linkMicSignalingUrlEdit_ != nullptr
-                                                  ? linkMicSignalingUrlEdit_->text().trimmed()
-                                                  : QString());
-    config.roomId = linkMicRoomIdEdit_ != nullptr ? linkMicRoomIdEdit_->text().trimmed() : QString();
-    config.userId = linkMicUserIdEdit_ != nullptr ? linkMicUserIdEdit_->text().trimmed() : QString();
-    config.displayName = linkMicDisplayNameEdit_ != nullptr
-        ? linkMicDisplayNameEdit_->text().trimmed()
-        : QString();
-    if (config.displayName.isEmpty()) {
-        config.displayName = config.userId;
-    }
-    config.role = linkMicRoleCombo_ != nullptr ? linkMicRoleCombo_->currentText().trimmed() : "controller";
+    config.signalingUrl = QUrl::fromUserInput(businessSnapshot_.signalingUrl.trimmed());
+    config.roomKey = businessSnapshot_.roomKey.trimmed();
+    config.userId = businessSnapshot_.userId > 0 ? QString::number(businessSnapshot_.userId) : QString();
+    config.displayName = fallbackText(businessSnapshot_.username, config.userId);
     config.requestTimeoutMs = 10000;
     return config;
 }
 
-QString LiveStudioWindow::selectedAudienceMemberId() const {
-    if (audienceMemberTable_ == nullptr || audienceMemberTable_->currentRow() < 0) {
-        return {};
-    }
-
-    const auto* item = audienceMemberTable_->item(audienceMemberTable_->currentRow(), 0);
-    if (item == nullptr) {
-        return {};
-    }
-    return item->data(Qt::UserRole).toString().trimmed();
+live_studio::linkmic::CrossRoomInviteTarget LiveStudioWindow::buildInviteTarget() const {
+    live_studio::linkmic::CrossRoomInviteTarget target;
+    target.roomKey = linkMicTargetRoomKeyEdit_ != nullptr ? linkMicTargetRoomKeyEdit_->text().trimmed() : QString();
+    target.userId = linkMicTargetUserIdEdit_ != nullptr ? linkMicTargetUserIdEdit_->text().trimmed() : QString();
+    return target;
 }
 
 QImage LiveStudioWindow::videoFrameToImage(const live_studio::media::VideoFrame& frame) {
@@ -1841,8 +1935,14 @@ QString LiveStudioWindow::formatLinkMicEvent(const live_studio::linkmic::LinkMic
     if (!entry.state.trimmed().isEmpty()) {
         parts.push_back("state=" + entry.state);
     }
+    if (!entry.sessionId.trimmed().isEmpty()) {
+        parts.push_back("session=" + entry.sessionId);
+    }
     if (!entry.requestId.trimmed().isEmpty()) {
         parts.push_back("request=" + entry.requestId);
+    }
+    if (!entry.remoteRoomKey.trimmed().isEmpty()) {
+        parts.push_back("remoteRoom=" + entry.remoteRoomKey);
     }
     if (!entry.remoteUserId.trimmed().isEmpty()) {
         parts.push_back("remote=" + entry.remoteUserId);

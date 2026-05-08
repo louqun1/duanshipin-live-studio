@@ -4,6 +4,8 @@ if(NOT TARGET Qt6::Core OR NOT TARGET Qt6::Gui OR NOT TARGET Qt6::Widgets OR
     return()
 endif()
 
+live_studio_require_libdatachannel()
+
 find_package(Qt6WebSockets QUIET)
 if(NOT TARGET Qt6::WebSockets)
     message(WARNING "Skipping live_studio_panel because Qt6 WebSockets is not available.")
@@ -21,6 +23,8 @@ add_executable(live_studio_panel
     ${CMAKE_SOURCE_DIR}/src/linkmic/LinkMicSession.cpp
     ${CMAKE_SOURCE_DIR}/src/linkmic/LinkMicSignalingClient.cpp
     ${CMAKE_SOURCE_DIR}/src/linkmic/RoomMemberDirectory.cpp
+    ${CMAKE_SOURCE_DIR}/src/rtc/RtcSignalingBridge.cpp
+    ${CMAKE_SOURCE_DIR}/src/rtc/RtcPeerSession.cpp
 )
 
 target_include_directories(live_studio_panel
@@ -36,6 +40,7 @@ target_link_libraries(live_studio_panel
         Qt6::Network
         Qt6::WebSockets
         Qt6::Widgets
+        LibDataChannel::LibDataChannel
         live_studio_core
 )
 

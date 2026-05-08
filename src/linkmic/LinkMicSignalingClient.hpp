@@ -29,10 +29,7 @@ public:
     [[nodiscard]] SignalingConnectionState connectionState() const;
     [[nodiscard]] QString lastError() const;
 
-    bool sendBusinessMessage(const QString& type,
-                             const QString& toUserId,
-                             const QString& requestId,
-                             const QJsonObject& payload);
+    bool sendMessage(const QJsonObject& message);
 
 private:
     void handleSocketConnected();

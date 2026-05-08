@@ -1,5 +1,6 @@
 #include "linkmic/LinkMicSession.hpp"
 
+#include <QJsonArray>
 #include <QJsonDocument>
 
 namespace live_studio::linkmic {
@@ -15,31 +16,50 @@ QString firstString(const QJsonObject& object, std::initializer_list<const char*
     return {};
 }
 
+QJsonObject extractPayloadObject(const QJsonObject& message) {
+    if (message.contains("payload") && message.value("payload").isObject()) {
+        return message.value("payload").toObject();
+    }
+    return {};
+}
+
+QString extractType(const QJsonObject& message) {
+    return message.value("type").toString().trimmed();
+}
+
+QString extractSessionId(const QJsonObject& message) {
+    return firstString(message, {"sessionId", "session_id"});
+}
+
 QString extractRequestId(const QJsonObject& message) {
-    return message.value("request_id").toString().trimmed();
+    return firstString(message, {"requestId", "request_id"});
+}
+
+QString extractRemoteRoomKey(const QJsonObject& message) {
+    return firstString(message, {"fromRoomKey", "from_room_key"});
 }
 
 QString extractRemoteUserId(const QJsonObject& message) {
-    return firstString(message, {"from_user_id", "peer_id", "user_id", "member_id"});
+    return firstString(message, {"fromUserId", "from_user_id", "peer_id", "user_id", "member_id"});
 }
 
-QString extractStateSyncValue(const QJsonObject& message) {
-    if (message.contains("payload") && message.value("payload").isObject()) {
-        const QJsonObject payload = message.value("payload").toObject();
-        const QString payloadState = payload.value("state").toString().trimmed();
-        if (!payloadState.isEmpty()) {
-            return payloadState;
-        }
-    }
-    return message.value("state").toString().trimmed();
+QString extractToRoomKey(const QJsonObject& message) {
+    return firstString(message, {"toRoomKey", "to_room_key"});
 }
 
-bool messageTargetsLocalUser(const QJsonObject& message, const QString& localUserId) {
-    if (!message.contains("to_user_id")) {
-        return true;
+QString extractToUserId(const QJsonObject& message) {
+    return firstString(message, {"toUserId", "to_user_id"});
+}
+
+bool messageTargetsLocalUser(const QJsonObject& message,
+                             const QString& localRoomKey,
+                             const QString& localUserId) {
+    const QString toRoomKey = extractToRoomKey(message);
+    if (!toRoomKey.isEmpty() && toRoomKey != localRoomKey) {
+        return false;
     }
 
-    const QString toUserId = message.value("to_user_id").toString().trimmed();
+    const QString toUserId = extractToUserId(message);
     return toUserId.isEmpty() || toUserId == localUserId || toUserId == "*";
 }
 
@@ -47,30 +67,33 @@ QString compactJson(const QJsonObject& object) {
     return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
 }
 
-QString joinParamsDetail(const RtcJoinParams& params) {
-    if (!params.isValid()) {
-        return "{}";
-    }
-    return joinParamsSummary(params);
-}
-
 RtcJoinParams parseJoinParams(const QJsonObject& message) {
-    QJsonObject payload;
-    if (message.contains("payload") && message.value("payload").isObject()) {
-        payload = message.value("payload").toObject();
-    }
+    const QJsonObject payload = extractPayloadObject(message);
 
     RtcJoinParams params;
-    params.livekitUrl = firstString(payload, {"livekit_url", "livekitUrl", "url"});
-    params.roomName = firstString(payload, {"room_name", "roomName"});
-    params.token = firstString(payload, {"token"});
-    params.participantRole = firstString(payload, {"participant_role", "participantRole", "role"});
+    params.sessionId = firstString(payload, {"sessionId", "session_id"});
+    params.requestId = firstString(payload, {"requestId", "request_id"});
+    if (params.requestId.isEmpty()) {
+        params.requestId = extractRequestId(message);
+    }
+    params.roomAKey = firstString(payload, {"roomAKey", "room_a_key"});
+    params.roomBKey = firstString(payload, {"roomBKey", "room_b_key"});
+    params.selfRoomKey = firstString(payload, {"selfRoomKey", "self_room_key"});
+    params.peerRoomKey = firstString(payload, {"peerRoomKey", "peer_room_key"});
+    params.selfUserId = firstString(payload, {"selfUserId", "self_user_id"});
+    params.peerUserId = firstString(payload, {"peerUserId", "peer_user_id"});
+    params.businessRole = firstString(payload, {"businessRole", "business_role"});
+    params.rtcRole = firstString(payload, {"rtcRole", "rtc_role"});
+    params.signalingUrl = firstString(payload, {"signalingUrl", "signaling_url"});
+    params.rtcBackend = firstString(payload, {"rtcBackend", "rtc_backend", "transport"});
+    params.mediaMode = firstString(payload, {"mediaMode", "media_mode"});
+    if (payload.contains("iceServers") && payload.value("iceServers").isArray()) {
+        params.iceServers = payload.value("iceServers").toArray();
+    } else if (payload.contains("ice_servers") && payload.value("ice_servers").isArray()) {
+        params.iceServers = payload.value("ice_servers").toArray();
+    }
     params.raw = payload;
     return params;
-}
-
-bool isTerminalState(const LinkMicRoomState& state) {
-    return state.signalState() == state.resetStateForRole() || state.signalState() == "failed";
 }
 
 }  // namespace
@@ -96,8 +119,71 @@ void LinkMicSession::setUpdateHandler(UpdateHandler handler) {
     onUpdated_ = std::move(handler);
 }
 
+void LinkMicSession::setExternalMessageSender(ExternalMessageSender sender) {
+    externalMessageSender_ = std::move(sender);
+}
+
+void LinkMicSession::setUseExternalTransport(bool enabled) {
+    useExternalTransport_ = enabled;
+}
+
+void LinkMicSession::setExternalTransportState(SignalingConnectionState state, const QString& detail) {
+    if (useExternalTransport_ && externalTransportState_ == state && externalTransportDetail_ == detail) {
+        return;
+    }
+    externalTransportState_ = state;
+    externalTransportDetail_ = detail;
+
+    if (!useExternalTransport_) {
+        return;
+    }
+
+    switch (state) {
+    case SignalingConnectionState::connecting:
+        roomState_.setConnectionState(state);
+        appendEvent("transport", "signaling.connecting", detail, roomState_.signalState());
+        break;
+    case SignalingConnectionState::connected:
+        roomState_.setConnectionState(state);
+        roomState_.markRegistered();
+        appendEvent("transport", "signaling.connected", detail, roomState_.signalState());
+        break;
+    case SignalingConnectionState::disconnected:
+        stopRequestTimer();
+        roomState_.markDisconnected();
+        rtcConnectedNotifiedSessionId_.clear();
+        appendEvent("transport", "signaling.disconnected", detail, roomState_.signalState());
+        break;
+    case SignalingConnectionState::failed:
+        stopRequestTimer();
+        roomState_.failTransport(detail.isEmpty() ? "business signaling failure" : detail);
+        appendEvent("transport",
+                    "signaling.failed",
+                    roomState_.lastError(),
+                    roomState_.signalState(),
+                    roomState_.activeSessionId(),
+                    roomState_.activeRequestId(),
+                    roomState_.remoteRoomKey(),
+                    roomState_.remoteUserId());
+        break;
+    }
+
+    notifyUpdated();
+}
+
+void LinkMicSession::processExternalMessage(const QJsonObject& message) {
+    if (!useExternalTransport_) {
+        return;
+    }
+    handleIncomingMessage(message);
+}
+
 bool LinkMicSession::connectToRoom(const LinkMicSessionConfig& config) {
     if (!config.isValid()) {
+        return false;
+    }
+
+    if (useExternalTransport_ && !externalMessageSender_) {
         return false;
     }
 
@@ -105,64 +191,65 @@ bool LinkMicSession::connectToRoom(const LinkMicSessionConfig& config) {
     eventLog_.clear();
     memberDirectory_.clear();
     memberDirectory_.setLocalUserId(config.userId);
-    roomState_.reset(config.role);
-    roomState_.setConnectionState(SignalingConnectionState::connecting);
+    roomState_.reset();
+    rtcConnectedNotifiedSessionId_.clear();
     stopRequestTimer();
-    appendEvent("local", "session.connect", "connecting to signaling service", roomState_.signalState());
-    signalingClient_.connectToServer(config_);
+
+    if (useExternalTransport_) {
+        roomState_.setConnectionState(externalTransportState_ == SignalingConnectionState::connected
+                                          ? SignalingConnectionState::connected
+                                          : SignalingConnectionState::connecting);
+        appendEvent("local", "session.connect", "binding to business signaling transport", roomState_.signalState());
+        if (externalTransportState_ == SignalingConnectionState::connected) {
+            roomState_.markRegistered();
+            appendEvent("transport",
+                        "signaling.connected",
+                        externalTransportDetail_.isEmpty() ? "business websocket connected" : externalTransportDetail_,
+                        roomState_.signalState());
+        }
+    } else {
+        roomState_.setConnectionState(SignalingConnectionState::connecting);
+        appendEvent("local", "session.connect", "connecting to signaling service", roomState_.signalState());
+        signalingClient_.connectToServer(config_);
+    }
     notifyUpdated();
     return true;
 }
 
 void LinkMicSession::disconnectFromRoom() {
     stopRequestTimer();
-    signalingClient_.disconnectFromServer();
+    rtcConnectedNotifiedSessionId_.clear();
+    if (!useExternalTransport_) {
+        signalingClient_.disconnectFromServer();
+    }
     roomState_.markDisconnected();
     memberDirectory_.clear();
     appendEvent("local", "session.disconnect", "disconnected from signaling service", roomState_.signalState());
     notifyUpdated();
 }
 
-bool LinkMicSession::invite(const QString& targetUserId) {
-    const auto targetMember = memberDirectory_.memberById(targetUserId);
-    const bool targetInLinkMic = targetMember.has_value() && targetMember->inLinkMic;
-    if (targetUserId.trimmed() == config_.userId ||
-        !roomState_.canInvite(targetUserId, targetInLinkMic)) {
+bool LinkMicSession::invite(const QString& targetRoomKey, const QString& targetUserId) {
+    if (!roomState_.canInvite(config_.roomKey, config_.userId, targetRoomKey, targetUserId)) {
         return false;
     }
 
-    const QString requestId = roomState_.beginInvite(config_.userId, targetUserId);
+    const LinkMicRequestIds ids = roomState_.beginInvite(config_.roomKey, config_.userId, targetRoomKey, targetUserId);
     startRequestTimer("waiting for invite response");
-    return sendBusinessMessage("linkmic.invite",
-                               targetUserId,
-                               requestId,
-                               {
-                                   {"initiator_role", config_.role},
-                                   {"display_name", config_.displayName},
-                                   {"client_name", "live_studio_panel"}
-                               },
-                               "sent linkmic.invite");
-}
-
-bool LinkMicSession::apply(const QString& targetUserId) {
-    const auto targetMember = memberDirectory_.memberById(targetUserId);
-    const bool targetInLinkMic = targetMember.has_value() && targetMember->inLinkMic;
-    if (targetUserId.trimmed() == config_.userId ||
-        !roomState_.canApply(targetUserId, targetInLinkMic)) {
-        return false;
-    }
-
-    const QString requestId = roomState_.beginApply(config_.userId, targetUserId);
-    startRequestTimer("waiting for host response");
-    return sendBusinessMessage("linkmic.apply",
-                               targetUserId,
-                               requestId,
-                               {
-                                   {"initiator_role", config_.role},
-                                   {"display_name", config_.displayName},
-                                   {"client_name", "live_studio_panel"}
-                               },
-                               "sent linkmic.apply");
+    return sendEnvelope(
+        buildEnvelope("linkmic.invite",
+                      ids.sessionId,
+                      ids.requestId,
+                      targetRoomKey,
+                      targetUserId,
+                      {
+                          {"displayName", config_.displayName},
+                          {"display_name", config_.displayName},
+                          {"businessRole", "inviter"},
+                          {"business_role", "inviter"},
+                          {"clientName", "live_studio_panel"},
+                          {"client_name", "live_studio_panel"}
+                      }),
+        "sent cross-room invite");
 }
 
 bool LinkMicSession::accept() {
@@ -170,21 +257,27 @@ bool LinkMicSession::accept() {
         return false;
     }
 
+    const QString sessionId = roomState_.activeSessionId();
     const QString requestId = roomState_.activeRequestId();
+    const QString remoteRoomKey = roomState_.remoteRoomKey();
     const QString remoteUserId = roomState_.remoteUserId();
-    const QString acceptedFrom = roomState_.incomingRequestType();
     roomState_.handleOutgoingAccept();
     startRequestTimer("waiting for rtc.join-params");
 
-    return sendBusinessMessage("linkmic.accept",
-                               remoteUserId,
-                               requestId,
-                               {
-                                   {"decision", "accept"},
-                                   {"accepted_from", acceptedFrom},
-                                   {"client_name", "live_studio_panel"}
-                               },
-                               "sent linkmic.accept");
+    return sendEnvelope(
+        buildEnvelope("linkmic.accept",
+                      sessionId,
+                      requestId,
+                      remoteRoomKey,
+                      remoteUserId,
+                      {
+                          {"decision", "accept"},
+                          {"businessRole", "invitee"},
+                          {"business_role", "invitee"},
+                          {"clientName", "live_studio_panel"},
+                          {"client_name", "live_studio_panel"}
+                      }),
+        "accepted incoming cross-room invite");
 }
 
 bool LinkMicSession::reject() {
@@ -192,21 +285,27 @@ bool LinkMicSession::reject() {
         return false;
     }
 
+    const QString sessionId = roomState_.activeSessionId();
     const QString requestId = roomState_.activeRequestId();
+    const QString remoteRoomKey = roomState_.remoteRoomKey();
     const QString remoteUserId = roomState_.remoteUserId();
-    const QString rejectedFrom = roomState_.incomingRequestType();
     roomState_.handleOutgoingReject();
     stopRequestTimer();
 
-    return sendBusinessMessage("linkmic.reject",
-                               remoteUserId,
-                               requestId,
-                               {
-                                   {"decision", "reject"},
-                                   {"rejected_from", rejectedFrom},
-                                   {"client_name", "live_studio_panel"}
-                               },
-                               "sent linkmic.reject");
+    return sendEnvelope(
+        buildEnvelope("linkmic.reject",
+                      sessionId,
+                      requestId,
+                      remoteRoomKey,
+                      remoteUserId,
+                      {
+                          {"decision", "reject"},
+                          {"businessRole", "invitee"},
+                          {"business_role", "invitee"},
+                          {"clientName", "live_studio_panel"},
+                          {"client_name", "live_studio_panel"}
+                      }),
+        "rejected incoming cross-room invite");
 }
 
 bool LinkMicSession::hangup() {
@@ -214,22 +313,67 @@ bool LinkMicSession::hangup() {
         return false;
     }
 
+    const QString sessionId = roomState_.activeSessionId();
     const QString requestId = roomState_.activeRequestId();
+    const QString remoteRoomKey = roomState_.remoteRoomKey();
     const QString remoteUserId = roomState_.remoteUserId();
-    const QString currentState = roomState_.signalState();
-    const bool shouldCancel =
-        currentState == "host-inviting" || currentState == "waiting-host";
+    const bool shouldCancel = roomState_.signalState() == LinkMicRoomState::waitingResponseState();
     roomState_.handleOutgoingTerminate();
     stopRequestTimer();
 
-    return sendBusinessMessage(shouldCancel ? "linkmic.cancel" : "linkmic.hangup",
-                               remoteUserId,
-                               requestId,
-                               {
-                                   {"reason", shouldCancel ? "manual-cancel" : "manual-hangup"},
-                                   {"client_name", "live_studio_panel"}
-                               },
-                               shouldCancel ? "sent linkmic.cancel" : "sent linkmic.hangup");
+    const bool sent = sendEnvelope(
+        buildEnvelope(shouldCancel ? "linkmic.cancel" : "linkmic.hangup",
+                      sessionId,
+                      requestId,
+                      remoteRoomKey,
+                      remoteUserId,
+                      {
+                          {"reason", shouldCancel ? "manual-cancel" : "manual-hangup"},
+                          {"clientName", "live_studio_panel"},
+                          {"client_name", "live_studio_panel"}
+                      }),
+        shouldCancel ? "cancelled outgoing invite" : "hung up active cross-room session");
+    if (sent) {
+        roomState_.handleHangupOrKick(sessionId, requestId, remoteRoomKey, remoteUserId);
+        rtcConnectedNotifiedSessionId_.clear();
+        notifyUpdated();
+    }
+    return sent;
+}
+
+bool LinkMicSession::noteRtcConnected() {
+    const QString sessionId = roomState_.activeSessionId();
+    if (sessionId.isEmpty() || rtcConnectedNotifiedSessionId_ == sessionId) {
+        return false;
+    }
+
+    rtcConnectedNotifiedSessionId_ = sessionId;
+    roomState_.handleRtcConnected();
+    appendEvent("local",
+                "rtc.connected",
+                "local PeerConnection connected",
+                roomState_.signalState(),
+                sessionId,
+                roomState_.activeRequestId(),
+                roomState_.remoteRoomKey(),
+                roomState_.remoteUserId());
+
+    const bool sent = sendEnvelope(
+        buildEnvelope("linkmic.connected",
+                      sessionId,
+                      roomState_.activeRequestId(),
+                      roomState_.remoteRoomKey(),
+                      roomState_.remoteUserId(),
+                      {
+                          {"state", "connected"},
+                          {"rtcRole", roomState_.rtcRole()},
+                          {"rtc_role", roomState_.rtcRole()},
+                          {"clientName", "live_studio_panel"},
+                          {"client_name", "live_studio_panel"}
+                      }),
+        "reported local PeerConnection connected");
+    notifyUpdated();
+    return sent;
 }
 
 const LinkMicSessionConfig& LinkMicSession::config() const {
@@ -248,6 +392,10 @@ const QVector<LinkMicEventLogEntry>& LinkMicSession::eventLog() const {
     return eventLog_;
 }
 
+bool LinkMicSession::usesExternalTransport() const {
+    return useExternalTransport_;
+}
+
 void LinkMicSession::handleTransportStateChanged(SignalingConnectionState state, const QString& detail) {
     switch (state) {
     case SignalingConnectionState::connecting:
@@ -260,6 +408,7 @@ void LinkMicSession::handleTransportStateChanged(SignalingConnectionState state,
         break;
     case SignalingConnectionState::disconnected:
         stopRequestTimer();
+        rtcConnectedNotifiedSessionId_.clear();
         roomState_.markDisconnected();
         memberDirectory_.clear();
         appendEvent("transport", "signaling.disconnected", detail, roomState_.signalState());
@@ -271,7 +420,9 @@ void LinkMicSession::handleTransportStateChanged(SignalingConnectionState state,
                     "signaling.failed",
                     roomState_.lastError(),
                     roomState_.signalState(),
+                    roomState_.activeSessionId(),
                     roomState_.activeRequestId(),
+                    roomState_.remoteRoomKey(),
                     roomState_.remoteUserId());
         break;
     }
@@ -280,31 +431,37 @@ void LinkMicSession::handleTransportStateChanged(SignalingConnectionState state,
 }
 
 void LinkMicSession::handleObservedMessage(const QString& direction, const QJsonObject& message) {
-    const QString type = message.value("type").toString().trimmed();
+    const QString type = extractType(message);
     if (type == "probe.register") {
         appendEvent(direction,
                     type,
                     "registered local client with signaling service",
                     roomState_.signalState(),
+                    extractSessionId(message),
                     extractRequestId(message),
-                    message.value("peer_id").toString().trimmed());
+                    extractRemoteRoomKey(message),
+                    extractRemoteUserId(message));
         notifyUpdated();
     }
 }
 
 void LinkMicSession::handleIncomingMessage(const QJsonObject& message) {
-    const QString type = message.value("type").toString().trimmed();
+    const QString type = extractType(message);
+    const QString sessionId = extractSessionId(message);
     const QString requestId = extractRequestId(message);
+    const QString remoteRoomKey = extractRemoteRoomKey(message);
     const QString remoteUserId = extractRemoteUserId(message);
 
     if (type == "signal.error") {
         stopRequestTimer();
-        roomState_.failSession(firstString(message, {"message"}));
+        roomState_.recoverFromSignalError(firstString(message, {"message"}));
         appendEvent("recv",
                     type,
                     roomState_.lastError(),
                     roomState_.signalState(),
+                    sessionId,
                     requestId,
+                    remoteRoomKey,
                     remoteUserId);
         notifyUpdated();
         return;
@@ -316,7 +473,9 @@ void LinkMicSession::handleIncomingMessage(const QJsonObject& message) {
                     type,
                     "registration acknowledged by signaling service",
                     roomState_.signalState(),
+                    sessionId,
                     requestId,
+                    remoteRoomKey,
                     remoteUserId);
         notifyUpdated();
         return;
@@ -334,67 +493,31 @@ void LinkMicSession::handleIncomingMessage(const QJsonObject& message) {
 
     if (type == "room.member-join") {
         memberDirectory_.applyJoinFromMessage(message);
-        appendEvent("recv",
-                    type,
-                    "member joined room",
-                    roomState_.signalState(),
-                    requestId,
-                    remoteUserId);
+        appendEvent("recv", type, "member joined current room", roomState_.signalState());
         notifyUpdated();
         return;
     }
 
     if (type == "room.member-leave") {
         memberDirectory_.applyLeaveFromMessage(message);
-        appendEvent("recv",
-                    type,
-                    "member left room",
-                    roomState_.signalState(),
-                    requestId,
-                    remoteUserId);
-        if (!roomState_.remoteUserId().isEmpty() && roomState_.remoteUserId() == remoteUserId) {
-            stopRequestTimer();
-            roomState_.handleHangupOrKick(roomState_.activeRequestId(), remoteUserId);
-            memberDirectory_.clearLinkMicFlags();
-            appendEvent("local",
-                        "linkmic.reset",
-                        "active partner left the room",
-                        roomState_.signalState(),
-                        requestId,
-                        remoteUserId);
-        }
+        appendEvent("recv", type, "member left current room", roomState_.signalState());
         notifyUpdated();
         return;
     }
 
-    if (!messageTargetsLocalUser(message, config_.userId)) {
+    if (!messageTargetsLocalUser(message, config_.roomKey, config_.userId)) {
         return;
     }
 
-    if (remoteUserId == config_.userId && !remoteUserId.isEmpty()) {
-        return;
-    }
-
-    if (!roomState_.matchesRequestId(requestId) &&
-        (type.startsWith("linkmic.") || type == "rtc.join-params")) {
+    if (!roomState_.matchesSession(sessionId, requestId) &&
+        (type.startsWith("linkmic.") || type.startsWith("rtc."))) {
         appendEvent("recv",
                     type,
-                    "ignored message for another active request",
+                    "ignored message for another cross-room session",
                     roomState_.signalState(),
+                    sessionId,
                     requestId,
-                    remoteUserId);
-        notifyUpdated();
-        return;
-    }
-
-    if (type == "linkmic.apply") {
-        stopRequestTimer();
-        roomState_.handleIncomingApply(requestId, remoteUserId);
-        appendEvent("recv",
-                    type,
-                    "incoming guest apply",
-                    roomState_.signalState(),
-                    requestId,
+                    remoteRoomKey,
                     remoteUserId);
         notifyUpdated();
         return;
@@ -402,41 +525,59 @@ void LinkMicSession::handleIncomingMessage(const QJsonObject& message) {
 
     if (type == "linkmic.invite") {
         stopRequestTimer();
-        roomState_.handleIncomingInvite(requestId, remoteUserId);
+        roomState_.handleIncomingInvite(sessionId, requestId, remoteRoomKey, remoteUserId);
         appendEvent("recv",
                     type,
-                    "incoming host invite",
+                    "incoming cross-room invite",
                     roomState_.signalState(),
+                    sessionId,
                     requestId,
+                    remoteRoomKey,
                     remoteUserId);
         notifyUpdated();
         return;
     }
 
     if (type == "linkmic.accept") {
-        roomState_.handleIncomingAccept(requestId, remoteUserId);
+        roomState_.handleIncomingAccept(sessionId, requestId, remoteRoomKey, remoteUserId);
         startRequestTimer("waiting for rtc.join-params");
         appendEvent("recv",
                     type,
-                    "remote side accepted, waiting for rtc.join-params",
+                    "remote anchor accepted, waiting for rtc.join-params",
                     roomState_.signalState(),
+                    sessionId,
                     requestId,
+                    remoteRoomKey,
                     remoteUserId);
         notifyUpdated();
         return;
     }
 
-    if (type == "rtc.join-params" || type == "linkmic.connected") {
+    if (type == "rtc.join-params") {
         stopRequestTimer();
         const RtcJoinParams joinParams = parseJoinParams(message);
-        roomState_.handleJoinParams(requestId, remoteUserId, joinParams);
-        memberDirectory_.clearLinkMicFlags();
-        memberDirectory_.setMemberLinkMicState(remoteUserId, true);
+        roomState_.handleJoinParams(sessionId, requestId, remoteRoomKey, remoteUserId, joinParams);
         appendEvent("recv",
                     type,
-                    joinParamsDetail(joinParams),
+                    joinParamsSummary(joinParams),
                     roomState_.signalState(),
+                    sessionId,
                     requestId,
+                    remoteRoomKey,
+                    remoteUserId);
+        notifyUpdated();
+        return;
+    }
+
+    if (type == "linkmic.connected") {
+        roomState_.handleRtcConnected();
+        appendEvent("recv",
+                    type,
+                    "peer connection marked connected by remote anchor",
+                    roomState_.signalState(),
+                    sessionId,
+                    requestId,
+                    remoteRoomKey,
                     remoteUserId);
         notifyUpdated();
         return;
@@ -444,13 +585,15 @@ void LinkMicSession::handleIncomingMessage(const QJsonObject& message) {
 
     if (type == "linkmic.reject" || type == "linkmic.cancel") {
         stopRequestTimer();
-        roomState_.handleRejectOrCancel(requestId, remoteUserId);
-        memberDirectory_.clearLinkMicFlags();
+        rtcConnectedNotifiedSessionId_.clear();
+        roomState_.handleRejectOrCancel(sessionId, requestId, remoteRoomKey, remoteUserId);
         appendEvent("recv",
                     type,
-                    "request ended before RTC join",
+                    "cross-room invite ended before RTC setup",
                     roomState_.signalState(),
+                    sessionId,
                     requestId,
+                    remoteRoomKey,
                     remoteUserId);
         notifyUpdated();
         return;
@@ -458,33 +601,15 @@ void LinkMicSession::handleIncomingMessage(const QJsonObject& message) {
 
     if (type == "linkmic.hangup" || type == "linkmic.kick") {
         stopRequestTimer();
-        roomState_.handleHangupOrKick(requestId, remoteUserId);
-        memberDirectory_.clearLinkMicFlags();
+        rtcConnectedNotifiedSessionId_.clear();
+        roomState_.handleHangupOrKick(sessionId, requestId, remoteRoomKey, remoteUserId);
         appendEvent("recv",
                     type,
-                    "linkmic session ended",
+                    "cross-room RTC session ended",
                     roomState_.signalState(),
+                    sessionId,
                     requestId,
-                    remoteUserId);
-        notifyUpdated();
-        return;
-    }
-
-    if (type == "linkmic.state-sync") {
-        const QString syncedState = extractStateSyncValue(message);
-        roomState_.handleStateSync(requestId, remoteUserId, syncedState);
-        if (roomState_.signalState() == roomState_.activeStateForRole()) {
-            memberDirectory_.clearLinkMicFlags();
-            memberDirectory_.setMemberLinkMicState(roomState_.remoteUserId(), true);
-        } else if (roomState_.signalState() == roomState_.resetStateForRole()) {
-            memberDirectory_.clearLinkMicFlags();
-            stopRequestTimer();
-        }
-        appendEvent("recv",
-                    type,
-                    syncedState.isEmpty() ? compactJson(message) : syncedState,
-                    roomState_.signalState(),
-                    requestId,
+                    remoteRoomKey,
                     remoteUserId);
         notifyUpdated();
         return;
@@ -494,7 +619,9 @@ void LinkMicSession::handleIncomingMessage(const QJsonObject& message) {
                 type,
                 compactJson(message),
                 roomState_.signalState(),
+                sessionId,
                 requestId,
+                remoteRoomKey,
                 remoteUserId);
     notifyUpdated();
 }
@@ -502,13 +629,15 @@ void LinkMicSession::handleIncomingMessage(const QJsonObject& message) {
 void LinkMicSession::handleRequestTimeout() {
     const QString detail = roomState_.isWaitingJoinParams()
         ? "timed out waiting for rtc.join-params"
-        : (requestTimerReason_.trimmed().isEmpty() ? "linkmic request timed out" : requestTimerReason_);
+        : (requestTimerReason_.trimmed().isEmpty() ? "cross-room request timed out" : requestTimerReason_);
     roomState_.failSession(detail);
     appendEvent("local",
                 "timer.timeout",
                 detail,
                 roomState_.signalState(),
+                roomState_.activeSessionId(),
                 roomState_.activeRequestId(),
+                roomState_.remoteRoomKey(),
                 roomState_.remoteUserId());
     notifyUpdated();
 }
@@ -517,7 +646,9 @@ void LinkMicSession::appendEvent(const QString& direction,
                                  const QString& type,
                                  const QString& detail,
                                  const QString& state,
+                                 const QString& sessionId,
                                  const QString& requestId,
+                                 const QString& remoteRoomKey,
                                  const QString& remoteUserId) {
     if (eventLog_.size() >= 200) {
         eventLog_.removeFirst();
@@ -529,7 +660,9 @@ void LinkMicSession::appendEvent(const QString& direction,
     entry.type = type;
     entry.detail = detail;
     entry.state = state;
+    entry.sessionId = sessionId;
     entry.requestId = requestId;
+    entry.remoteRoomKey = remoteRoomKey;
     entry.remoteUserId = remoteUserId;
     eventLog_.push_back(std::move(entry));
 }
@@ -552,28 +685,59 @@ void LinkMicSession::stopRequestTimer() {
     requestTimer_.stop();
 }
 
-bool LinkMicSession::sendBusinessMessage(const QString& type,
-                                         const QString& toUserId,
-                                         const QString& requestId,
-                                         const QJsonObject& payload,
-                                         const QString& detail) {
-    appendEvent("send", type, detail, roomState_.signalState(), requestId, toUserId);
+QJsonObject LinkMicSession::buildEnvelope(const QString& type,
+                                          const QString& sessionId,
+                                          const QString& requestId,
+                                          const QString& toRoomKey,
+                                          const QString& toUserId,
+                                          const QJsonObject& payload) const {
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    return QJsonObject{
+        {"type", type},
+        {"sessionId", sessionId},
+        {"session_id", sessionId},
+        {"fromRoomKey", config_.roomKey},
+        {"from_room_key", config_.roomKey},
+        {"toRoomKey", toRoomKey.trimmed()},
+        {"to_room_key", toRoomKey.trimmed()},
+        {"fromUserId", config_.userId},
+        {"from_user_id", config_.userId},
+        {"toUserId", toUserId.trimmed()},
+        {"to_user_id", toUserId.trimmed()},
+        {"requestId", requestId},
+        {"request_id", requestId},
+        {"payload", payload},
+        {"tsMs", nowMs},
+        {"ts_ms", nowMs}
+    };
+}
 
-    if (!signalingClient_.sendBusinessMessage(type, toUserId, requestId, payload)) {
+bool LinkMicSession::sendEnvelope(const QJsonObject& envelope, const QString& detail) {
+    appendEvent("send",
+                envelope.value("type").toString().trimmed(),
+                detail,
+                roomState_.signalState(),
+                extractSessionId(envelope),
+                extractRequestId(envelope),
+                firstString(envelope, {"toRoomKey", "to_room_key"}),
+                firstString(envelope, {"toUserId", "to_user_id"}));
+
+    const bool sent = useExternalTransport_
+        ? externalMessageSender_(envelope)
+        : signalingClient_.sendMessage(envelope);
+    if (!sent) {
         stopRequestTimer();
-        roomState_.failSession("failed to send " + type);
+        roomState_.failSession("failed to send " + envelope.value("type").toString().trimmed());
         appendEvent("local",
                     "send.failed",
                     roomState_.lastError(),
                     roomState_.signalState(),
-                    requestId,
-                    toUserId);
+                    extractSessionId(envelope),
+                    extractRequestId(envelope),
+                    firstString(envelope, {"toRoomKey", "to_room_key"}),
+                    firstString(envelope, {"toUserId", "to_user_id"}));
         notifyUpdated();
         return false;
-    }
-
-    if (isTerminalState(roomState_)) {
-        memberDirectory_.clearLinkMicFlags();
     }
 
     notifyUpdated();

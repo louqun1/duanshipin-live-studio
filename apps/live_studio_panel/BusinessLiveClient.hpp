@@ -29,6 +29,7 @@ public:
     void beginStopSequence();
     void setPublishingActive(bool active);
     void shutdown();
+    bool sendSignalingEnvelope(const QJsonObject& object);
 
     [[nodiscard]] const BusinessLiveSnapshot& snapshot() const {
         return snapshot_;
@@ -43,6 +44,7 @@ signals:
     void readyToPublish();
     void warningRaised(const QString& message);
     void errorRaised(const QString& message);
+    void signalingMessageReceived(const QJsonObject& message);
 
 private:
     struct ParsedReply {
@@ -83,6 +85,7 @@ private:
     [[nodiscard]] QString normalizedApiBaseUrl() const;
     [[nodiscard]] QUrl apiUrlForPath(const QString& path) const;
     [[nodiscard]] bool shouldReconnect() const;
+    [[nodiscard]] bool sendSocketJsonMessage(const QJsonObject& object);
     [[nodiscard]] static ParsedReply parseReply(QNetworkReply* reply);
 
     QNetworkAccessManager network_;

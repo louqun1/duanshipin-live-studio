@@ -22,7 +22,7 @@ QJsonObject buildEnvelope(const LinkMicSessionConfig& config,
                           const QJsonObject& payload) {
     QJsonObject message{
         {"type", type},
-        {"room_id", config.roomId},
+        {"room_id", config.roomKey},
         {"from_user_id", config.userId},
         {"to_user_id", toUserId},
         {"request_id", requestId},
@@ -79,9 +79,9 @@ void LinkMicSignalingClient::connectToServer(const LinkMicSessionConfig& config)
 
     spdlog::info("[linkmic-ws] opening url={} roomId={} userId={} role={}",
                  toStdString(config.signalingUrl.toString(QUrl::FullyEncoded)),
-                 toStdString(config.roomId),
+                 toStdString(config.roomKey),
                  toStdString(config.userId),
-                 toStdString(config.role));
+                 "anchor");
     transitionState(SignalingConnectionState::connecting, "Opening signaling WebSocket");
     socket_.open(config.signalingUrl);
 }
@@ -104,11 +104,8 @@ QString LinkMicSignalingClient::lastError() const {
     return lastError_;
 }
 
-bool LinkMicSignalingClient::sendBusinessMessage(const QString& type,
-                                                 const QString& toUserId,
-                                                 const QString& requestId,
-                                                 const QJsonObject& payload) {
-    return sendRawMessage(buildEnvelope(config_, type, toUserId, requestId, payload));
+bool LinkMicSignalingClient::sendMessage(const QJsonObject& message) {
+    return sendRawMessage(message);
 }
 
 bool LinkMicSignalingClient::sendRawMessage(const QJsonObject& message) {
@@ -143,9 +140,9 @@ void LinkMicSignalingClient::transitionState(SignalingConnectionState state, con
 void LinkMicSignalingClient::sendRegistration() {
     QJsonObject registerMessage{
         {"type", "probe.register"},
-        {"room_id", config_.roomId},
+        {"room_id", config_.roomKey},
         {"peer_id", config_.userId},
-        {"role", config_.role},
+        {"role", "anchor"},
         {"mode", "signal"}
     };
 
@@ -160,16 +157,16 @@ void LinkMicSignalingClient::sendRegistration() {
     registerMessage.insert("payload", payload);
 
     spdlog::info("[linkmic-ws] send probe.register roomId={} peerId={} role={}",
-                 toStdString(config_.roomId),
+                 toStdString(config_.roomKey),
                  toStdString(config_.userId),
-                 toStdString(config_.role));
+                 "anchor");
     sendRawMessage(registerMessage);
 }
 
 void LinkMicSignalingClient::handleSocketConnected() {
     spdlog::info("[linkmic-ws] connected url={} roomId={} userId={}",
                  toStdString(config_.signalingUrl.toString(QUrl::FullyEncoded)),
-                 toStdString(config_.roomId),
+                 toStdString(config_.roomKey),
                  toStdString(config_.userId));
     transitionState(SignalingConnectionState::connected, "WebSocket connected");
     sendRegistration();
@@ -177,7 +174,7 @@ void LinkMicSignalingClient::handleSocketConnected() {
 
 void LinkMicSignalingClient::handleSocketDisconnected() {
     spdlog::warn("[linkmic-ws] disconnected roomId={} userId={} state={} error={}",
-                 toStdString(config_.roomId),
+                 toStdString(config_.roomKey),
                  toStdString(config_.userId),
                  static_cast<int>(socket_.state()),
                  toStdString(socket_.errorString()));
@@ -194,7 +191,7 @@ void LinkMicSignalingClient::handleSocketError(QAbstractSocket::SocketError erro
         lastError_ = "Unknown signaling WebSocket error.";
     }
     spdlog::error("[linkmic-ws] error roomId={} userId={} message={}",
-                  toStdString(config_.roomId),
+                  toStdString(config_.roomKey),
                   toStdString(config_.userId),
                   toStdString(lastError_));
     transitionState(SignalingConnectionState::failed, lastError_);

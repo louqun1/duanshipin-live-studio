@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDateTime>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
@@ -17,17 +18,34 @@ enum class SignalingConnectionState {
 
 struct LinkMicSessionConfig {
     QUrl signalingUrl;
-    QString roomId;
+    QString roomKey;
     QString userId;
     QString displayName;
-    QString role = "controller";
     int requestTimeoutMs = 10000;
 
     [[nodiscard]] bool isValid() const {
         return signalingUrl.isValid() &&
-            !roomId.trimmed().isEmpty() &&
+            !roomKey.trimmed().isEmpty() &&
             !userId.trimmed().isEmpty() &&
-            !role.trimmed().isEmpty();
+            !displayName.trimmed().isEmpty();
+    }
+};
+
+struct CrossRoomInviteTarget {
+    QString roomKey;
+    QString userId;
+
+    [[nodiscard]] bool isValid() const {
+        return !roomKey.trimmed().isEmpty() && !userId.trimmed().isEmpty();
+    }
+};
+
+struct LinkMicRequestIds {
+    QString sessionId;
+    QString requestId;
+
+    [[nodiscard]] bool isValid() const {
+        return !sessionId.trimmed().isEmpty() && !requestId.trimmed().isEmpty();
     }
 };
 
@@ -42,17 +60,29 @@ struct RoomMember {
 };
 
 struct RtcJoinParams {
-    QString livekitUrl;
-    QString roomName;
-    QString token;
-    QString participantRole;
+    QString sessionId;
+    QString requestId;
+    QString roomAKey;
+    QString roomBKey;
+    QString selfRoomKey;
+    QString peerRoomKey;
+    QString selfUserId;
+    QString peerUserId;
+    QString businessRole;
+    QString rtcRole;
+    QString signalingUrl;
+    QJsonArray iceServers;
+    QString rtcBackend;
+    QString mediaMode;
     QJsonObject raw;
 
     [[nodiscard]] bool isValid() const {
-        return !livekitUrl.trimmed().isEmpty() ||
-            !roomName.trimmed().isEmpty() ||
-            !token.trimmed().isEmpty() ||
-            !participantRole.trimmed().isEmpty();
+        return !sessionId.trimmed().isEmpty() &&
+            !selfRoomKey.trimmed().isEmpty() &&
+            !peerRoomKey.trimmed().isEmpty() &&
+            !selfUserId.trimmed().isEmpty() &&
+            !peerUserId.trimmed().isEmpty() &&
+            !rtcRole.trimmed().isEmpty();
     }
 };
 
@@ -62,7 +92,9 @@ struct LinkMicEventLogEntry {
     QString type;
     QString detail;
     QString state;
+    QString sessionId;
     QString requestId;
+    QString remoteRoomKey;
     QString remoteUserId;
 };
 
@@ -90,17 +122,23 @@ struct LinkMicEventLogEntry {
     }
 
     QStringList parts;
-    if (!params.roomName.trimmed().isEmpty()) {
-        parts.push_back("room=" + params.roomName);
+    if (!params.sessionId.trimmed().isEmpty()) {
+        parts.push_back("session=" + params.sessionId);
     }
-    if (!params.participantRole.trimmed().isEmpty()) {
-        parts.push_back("role=" + params.participantRole);
+    if (!params.selfRoomKey.trimmed().isEmpty() && !params.peerRoomKey.trimmed().isEmpty()) {
+        parts.push_back("rooms=" + params.selfRoomKey + " <-> " + params.peerRoomKey);
     }
-    if (!params.livekitUrl.trimmed().isEmpty()) {
-        parts.push_back("url=" + params.livekitUrl);
+    if (!params.businessRole.trimmed().isEmpty()) {
+        parts.push_back("business=" + params.businessRole);
     }
-    if (!params.token.trimmed().isEmpty()) {
-        parts.push_back("token=received");
+    if (!params.rtcRole.trimmed().isEmpty()) {
+        parts.push_back("rtc=" + params.rtcRole);
+    }
+    if (!params.rtcBackend.trimmed().isEmpty()) {
+        parts.push_back("backend=" + params.rtcBackend);
+    }
+    if (!params.mediaMode.trimmed().isEmpty()) {
+        parts.push_back("media=" + params.mediaMode);
     }
     return parts.join(" | ");
 }

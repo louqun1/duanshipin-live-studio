@@ -5,12 +5,11 @@
 namespace live_studio::linkmic {
 
 LinkMicRoomState::LinkMicRoomState() {
-    reset("controller");
+    reset();
 }
 
-void LinkMicRoomState::reset(const QString& role) {
-    role_ = role.trimmed().isEmpty() ? "controller" : role.trimmed();
-    signalState_ = resetStateForRole();
+void LinkMicRoomState::reset() {
+    signalState_ = idleState();
     lastError_.clear();
     connectionState_ = SignalingConnectionState::disconnected;
     registered_ = false;
@@ -25,7 +24,7 @@ void LinkMicRoomState::markRegistered() {
 void LinkMicRoomState::markDisconnected() {
     connectionState_ = SignalingConnectionState::disconnected;
     registered_ = false;
-    signalState_ = resetStateForRole();
+    signalState_ = idleState();
     lastError_.clear();
     clearRequestState();
 }
@@ -49,35 +48,33 @@ void LinkMicRoomState::failSession(const QString& error) {
     waitingJoinParams_ = false;
 }
 
-QString LinkMicRoomState::beginInvite(const QString& localUserId, const QString& targetUserId) {
-    lastError_.clear();
-    activeRequestId_ = nextRequestId(localUserId, targetUserId);
-    activeRequestType_ = "linkmic.invite";
-    remoteUserId_ = targetUserId.trimmed();
-    incomingRequestType_.clear();
-    waitingJoinParams_ = false;
-    hasJoinParams_ = false;
-    joinParams_ = {};
-    signalState_ = "host-inviting";
-    return activeRequestId_;
+void LinkMicRoomState::recoverFromSignalError(const QString& error) {
+    signalState_ = idleState();
+    lastError_ = error.trimmed();
+    clearRequestState();
 }
 
-QString LinkMicRoomState::beginApply(const QString& localUserId, const QString& targetUserId) {
+LinkMicRequestIds LinkMicRoomState::beginInvite(const QString& localRoomKey,
+                                                const QString& localUserId,
+                                                const QString& targetRoomKey,
+                                                const QString& targetUserId) {
     lastError_.clear();
-    activeRequestId_ = nextRequestId(localUserId, targetUserId);
-    activeRequestType_ = "linkmic.apply";
+    activeSessionId_ = nextSessionId(localRoomKey, localUserId, targetRoomKey, targetUserId);
+    activeRequestId_ = nextRequestId(localRoomKey, localUserId, targetRoomKey, targetUserId);
+    businessRole_ = "inviter";
+    rtcRole_.clear();
+    remoteRoomKey_ = targetRoomKey.trimmed();
     remoteUserId_ = targetUserId.trimmed();
-    incomingRequestType_.clear();
     waitingJoinParams_ = false;
     hasJoinParams_ = false;
     joinParams_ = {};
-    signalState_ = "waiting-host";
-    return activeRequestId_;
+    signalState_ = waitingResponseState();
+    return {activeSessionId_, activeRequestId_};
 }
 
 void LinkMicRoomState::handleOutgoingAccept() {
-    signalState_ = connectingStateForRole();
-    incomingRequestType_.clear();
+    signalState_ = waitingJoinParamsState();
+    businessRole_ = "invitee";
     waitingJoinParams_ = true;
     hasJoinParams_ = false;
     joinParams_ = {};
@@ -85,125 +82,138 @@ void LinkMicRoomState::handleOutgoingAccept() {
 }
 
 void LinkMicRoomState::handleOutgoingReject() {
-    signalState_ = resetStateForRole();
+    signalState_ = idleState();
     lastError_.clear();
     clearRequestState();
 }
 
 void LinkMicRoomState::handleOutgoingTerminate() {
-    signalState_ = endingStateForRole();
+    signalState_ = endingState();
     waitingJoinParams_ = false;
     lastError_.clear();
 }
 
-void LinkMicRoomState::handleIncomingApply(const QString& requestId, const QString& remoteUserId) {
+void LinkMicRoomState::handleIncomingInvite(const QString& sessionId,
+                                            const QString& requestId,
+                                            const QString& remoteRoomKey,
+                                            const QString& remoteUserId) {
     lastError_.clear();
+    activeSessionId_ = sessionId.trimmed();
     activeRequestId_ = requestId.trimmed();
-    activeRequestType_ = "linkmic.apply";
-    incomingRequestType_ = "linkmic.apply";
+    businessRole_ = "invitee";
+    rtcRole_.clear();
+    remoteRoomKey_ = remoteRoomKey.trimmed();
     remoteUserId_ = remoteUserId.trimmed();
     waitingJoinParams_ = false;
     hasJoinParams_ = false;
     joinParams_ = {};
-    signalState_ = "guest-applying";
+    signalState_ = incomingInviteState();
 }
 
-void LinkMicRoomState::handleIncomingInvite(const QString& requestId, const QString& remoteUserId) {
-    lastError_.clear();
-    activeRequestId_ = requestId.trimmed();
-    activeRequestType_ = "linkmic.invite";
-    incomingRequestType_ = "linkmic.invite";
-    remoteUserId_ = remoteUserId.trimmed();
-    waitingJoinParams_ = false;
-    hasJoinParams_ = false;
-    joinParams_ = {};
-    signalState_ = "guest-invited";
-}
-
-void LinkMicRoomState::handleIncomingAccept(const QString& requestId, const QString& remoteUserId) {
+void LinkMicRoomState::handleIncomingAccept(const QString& sessionId,
+                                            const QString& requestId,
+                                            const QString& remoteRoomKey,
+                                            const QString& remoteUserId) {
+    if (!sessionId.trimmed().isEmpty()) {
+        activeSessionId_ = sessionId.trimmed();
+    }
     if (!requestId.trimmed().isEmpty()) {
         activeRequestId_ = requestId.trimmed();
+    }
+    if (!remoteRoomKey.trimmed().isEmpty()) {
+        remoteRoomKey_ = remoteRoomKey.trimmed();
     }
     if (!remoteUserId.trimmed().isEmpty()) {
         remoteUserId_ = remoteUserId.trimmed();
     }
-    incomingRequestType_.clear();
+
+    businessRole_ = "inviter";
     waitingJoinParams_ = true;
     hasJoinParams_ = false;
     joinParams_ = {};
     lastError_.clear();
-    signalState_ = connectingStateForRole();
+    signalState_ = waitingJoinParamsState();
 }
 
-void LinkMicRoomState::handleJoinParams(const QString& requestId,
+void LinkMicRoomState::handleJoinParams(const QString& sessionId,
+                                        const QString& requestId,
+                                        const QString& remoteRoomKey,
                                         const QString& remoteUserId,
                                         const RtcJoinParams& joinParams) {
+    if (!sessionId.trimmed().isEmpty()) {
+        activeSessionId_ = sessionId.trimmed();
+    }
     if (!requestId.trimmed().isEmpty()) {
         activeRequestId_ = requestId.trimmed();
+    }
+    if (!remoteRoomKey.trimmed().isEmpty()) {
+        remoteRoomKey_ = remoteRoomKey.trimmed();
     }
     if (!remoteUserId.trimmed().isEmpty()) {
         remoteUserId_ = remoteUserId.trimmed();
     }
+
     joinParams_ = joinParams;
     hasJoinParams_ = joinParams.isValid();
     waitingJoinParams_ = false;
-    incomingRequestType_.clear();
+    if (!joinParams.businessRole.trimmed().isEmpty()) {
+        businessRole_ = joinParams.businessRole.trimmed();
+    }
+    if (!joinParams.rtcRole.trimmed().isEmpty()) {
+        rtcRole_ = joinParams.rtcRole.trimmed();
+    }
     lastError_.clear();
-    signalState_ = activeStateForRole();
+    signalState_ = rtcJoiningState();
 }
 
-void LinkMicRoomState::handleRejectOrCancel(const QString& requestId, const QString& remoteUserId) {
+void LinkMicRoomState::handleRtcConnected() {
+    waitingJoinParams_ = false;
+    lastError_.clear();
+    signalState_ = rtcConnectedState();
+}
+
+void LinkMicRoomState::handleRejectOrCancel(const QString& sessionId,
+                                            const QString& requestId,
+                                            const QString& remoteRoomKey,
+                                            const QString& remoteUserId) {
+    if (!sessionId.trimmed().isEmpty()) {
+        activeSessionId_ = sessionId.trimmed();
+    }
     if (!requestId.trimmed().isEmpty()) {
         activeRequestId_ = requestId.trimmed();
+    }
+    if (!remoteRoomKey.trimmed().isEmpty()) {
+        remoteRoomKey_ = remoteRoomKey.trimmed();
     }
     if (!remoteUserId.trimmed().isEmpty()) {
         remoteUserId_ = remoteUserId.trimmed();
     }
 
-    signalState_ = resetStateForRole();
+    signalState_ = idleState();
     lastError_.clear();
     clearRequestState();
 }
 
-void LinkMicRoomState::handleHangupOrKick(const QString& requestId, const QString& remoteUserId) {
+void LinkMicRoomState::handleHangupOrKick(const QString& sessionId,
+                                          const QString& requestId,
+                                          const QString& remoteRoomKey,
+                                          const QString& remoteUserId) {
+    if (!sessionId.trimmed().isEmpty()) {
+        activeSessionId_ = sessionId.trimmed();
+    }
     if (!requestId.trimmed().isEmpty()) {
         activeRequestId_ = requestId.trimmed();
+    }
+    if (!remoteRoomKey.trimmed().isEmpty()) {
+        remoteRoomKey_ = remoteRoomKey.trimmed();
     }
     if (!remoteUserId.trimmed().isEmpty()) {
         remoteUserId_ = remoteUserId.trimmed();
     }
 
-    signalState_ = resetStateForRole();
+    signalState_ = idleState();
     lastError_.clear();
     clearRequestState();
-}
-
-void LinkMicRoomState::handleStateSync(const QString& requestId,
-                                       const QString& remoteUserId,
-                                       const QString& syncedState) {
-    if (!requestId.trimmed().isEmpty()) {
-        activeRequestId_ = requestId.trimmed();
-    }
-    if (!remoteUserId.trimmed().isEmpty()) {
-        remoteUserId_ = remoteUserId.trimmed();
-    }
-
-    const QString nextState = syncedState.trimmed();
-    if (nextState.isEmpty()) {
-        return;
-    }
-
-    signalState_ = nextState;
-    lastError_.clear();
-
-    if (nextState == resetStateForRole()) {
-        clearRequestState();
-        return;
-    }
-
-    if (nextState == activeStateForRole()) {
-        waitingJoinParams_ = false;
-    }
 }
 
 bool LinkMicRoomState::isRegistered() const {
@@ -219,36 +229,33 @@ bool LinkMicRoomState::hasJoinParams() const {
 }
 
 bool LinkMicRoomState::hasActiveRequest() const {
-    return !activeRequestId_.isEmpty();
+    return !activeSessionId_.isEmpty() || !activeRequestId_.isEmpty();
 }
 
-bool LinkMicRoomState::matchesRequestId(const QString& requestId) const {
-    if (activeRequestId_.isEmpty()) {
+bool LinkMicRoomState::matchesSession(const QString& sessionId, const QString& requestId) const {
+    if (activeSessionId_.isEmpty() && activeRequestId_.isEmpty()) {
         return true;
     }
-    if (requestId.trimmed().isEmpty()) {
-        return false;
+    if (!activeSessionId_.isEmpty()) {
+        return !sessionId.trimmed().isEmpty() && activeSessionId_ == sessionId.trimmed();
     }
-    return activeRequestId_ == requestId.trimmed();
+    return !requestId.trimmed().isEmpty() && activeRequestId_ == requestId.trimmed();
 }
 
-bool LinkMicRoomState::canInvite(const QString& targetUserId, bool targetInLinkMic) const {
-    return isControllerRole() &&
-        canStartNewRequest() &&
+bool LinkMicRoomState::canInvite(const QString& localRoomKey,
+                                 const QString& localUserId,
+                                 const QString& targetRoomKey,
+                                 const QString& targetUserId) const {
+    return canStartNewRequest() &&
+        !localRoomKey.trimmed().isEmpty() &&
+        !localUserId.trimmed().isEmpty() &&
+        !targetRoomKey.trimmed().isEmpty() &&
         !targetUserId.trimmed().isEmpty() &&
-        !targetInLinkMic;
-}
-
-bool LinkMicRoomState::canApply(const QString& targetUserId, bool targetInLinkMic) const {
-    return !isControllerRole() &&
-        canStartNewRequest() &&
-        !targetUserId.trimmed().isEmpty() &&
-        !targetInLinkMic;
+        !(localRoomKey.trimmed() == targetRoomKey.trimmed() && localUserId.trimmed() == targetUserId.trimmed());
 }
 
 bool LinkMicRoomState::canAccept() const {
-    return !activeRequestId_.isEmpty() &&
-        (signalState_ == "guest-applying" || signalState_ == "guest-invited");
+    return !activeSessionId_.isEmpty() && signalState_ == incomingInviteState();
 }
 
 bool LinkMicRoomState::canReject() const {
@@ -256,35 +263,43 @@ bool LinkMicRoomState::canReject() const {
 }
 
 bool LinkMicRoomState::canTerminate() const {
-    if (activeRequestId_.isEmpty()) {
+    if (activeSessionId_.isEmpty()) {
         return false;
     }
 
-    return signalState_ == "host-inviting" ||
-        signalState_ == "waiting-host" ||
-        signalState_ == connectingStateForRole() ||
-        signalState_ == activeStateForRole() ||
-        signalState_ == endingStateForRole();
-}
-
-QString LinkMicRoomState::role() const {
-    return role_;
+    return signalState_ == waitingResponseState() ||
+        signalState_ == waitingJoinParamsState() ||
+        signalState_ == rtcJoiningState() ||
+        signalState_ == rtcConnectedState() ||
+        signalState_ == endingState();
 }
 
 QString LinkMicRoomState::signalState() const {
     return signalState_;
 }
 
+QString LinkMicRoomState::activeSessionId() const {
+    return activeSessionId_;
+}
+
 QString LinkMicRoomState::activeRequestId() const {
     return activeRequestId_;
 }
 
-QString LinkMicRoomState::remoteUserId() const {
-    return remoteUserId_;
+QString LinkMicRoomState::businessRole() const {
+    return businessRole_;
 }
 
-QString LinkMicRoomState::incomingRequestType() const {
-    return incomingRequestType_;
+QString LinkMicRoomState::rtcRole() const {
+    return rtcRole_;
+}
+
+QString LinkMicRoomState::remoteRoomKey() const {
+    return remoteRoomKey_;
+}
+
+QString LinkMicRoomState::remoteUserId() const {
+    return remoteUserId_;
 }
 
 QString LinkMicRoomState::lastError() const {
@@ -299,47 +314,76 @@ const RtcJoinParams& LinkMicRoomState::joinParams() const {
     return joinParams_;
 }
 
-QString LinkMicRoomState::resetStateForRole() const {
-    return isControllerRole() ? "live-only" : "idle";
+QString LinkMicRoomState::idleState() {
+    return "idle";
 }
 
-QString LinkMicRoomState::connectingStateForRole() const {
-    return isControllerRole() ? "linkmic-connecting" : "rtc-connecting";
+QString LinkMicRoomState::waitingResponseState() {
+    return "invite-sent";
 }
 
-QString LinkMicRoomState::activeStateForRole() const {
-    return isControllerRole() ? "linkmic-active" : "rtc-active";
+QString LinkMicRoomState::incomingInviteState() {
+    return "invite-received";
 }
 
-QString LinkMicRoomState::endingStateForRole() const {
-    return isControllerRole() ? "linkmic-ending" : "ending";
+QString LinkMicRoomState::waitingJoinParamsState() {
+    return "waiting-join-params";
 }
 
-bool LinkMicRoomState::isControllerRole() const {
-    return role_.compare("controller", Qt::CaseInsensitive) == 0;
+QString LinkMicRoomState::rtcJoiningState() {
+    return "rtc-joining";
+}
+
+QString LinkMicRoomState::rtcConnectedState() {
+    return "rtc-connected";
+}
+
+QString LinkMicRoomState::endingState() {
+    return "ending";
 }
 
 bool LinkMicRoomState::canStartNewRequest() const {
     return registered_ &&
         connectionState_ == SignalingConnectionState::connected &&
-        activeRequestId_.isEmpty() &&
-        signalState_ == resetStateForRole();
+        activeSessionId_.isEmpty() &&
+        signalState_ == idleState();
 }
 
-QString LinkMicRoomState::nextRequestId(const QString& localUserId, const QString& targetUserId) {
+QString LinkMicRoomState::nextRequestId(const QString& localRoomKey,
+                                        const QString& localUserId,
+                                        const QString& targetRoomKey,
+                                        const QString& targetUserId) {
     ++requestSequence_;
-    return QString("stage1-%1-to-%2-%3-%4")
+    return QString("cr-req-%1-%2-to-%3-%4-%5-%6")
+        .arg(localRoomKey.trimmed())
         .arg(localUserId.trimmed())
+        .arg(targetRoomKey.trimmed())
+        .arg(targetUserId.trimmed())
+        .arg(QDateTime::currentMSecsSinceEpoch())
+        .arg(requestSequence_);
+}
+
+QString LinkMicRoomState::nextSessionId(const QString& localRoomKey,
+                                        const QString& localUserId,
+                                        const QString& targetRoomKey,
+                                        const QString& targetUserId) {
+    ++requestSequence_;
+    return QString("cr-session-%1-%2-to-%3-%4-%5-%6")
+        .arg(localRoomKey.trimmed())
+        .arg(localUserId.trimmed())
+        .arg(targetRoomKey.trimmed())
         .arg(targetUserId.trimmed())
         .arg(QDateTime::currentMSecsSinceEpoch())
         .arg(requestSequence_);
 }
 
 void LinkMicRoomState::clearRequestState() {
+    activeSessionId_.clear();
     activeRequestId_.clear();
-    activeRequestType_.clear();
+    businessRole_.clear();
+    rtcRole_.clear();
+    remoteRoomKey_.clear();
     remoteUserId_.clear();
-    incomingRequestType_.clear();
     waitingJoinParams_ = false;
     hasJoinParams_ = false;
     joinParams_ = {};
