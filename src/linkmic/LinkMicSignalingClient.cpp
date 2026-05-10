@@ -10,9 +10,22 @@
 namespace live_studio::linkmic {
 namespace {
 
+constexpr auto kProtocolRegisterType = "probe.register";
+constexpr auto kProtocolRegisteredType = "probe.registered";
+
 std::string toStdString(const QString& value) {
     const QByteArray utf8 = value.toUtf8();
     return std::string(utf8.constData(), static_cast<std::size_t>(utf8.size()));
+}
+
+QString displayMessageType(const QString& type) {
+    if (type == QLatin1String(kProtocolRegisterType)) {
+        return QStringLiteral("signaling.register");
+    }
+    if (type == QLatin1String(kProtocolRegisteredType)) {
+        return QStringLiteral("signaling.registered");
+    }
+    return type;
 }
 
 QJsonObject buildEnvelope(const LinkMicSessionConfig& config,
@@ -138,8 +151,8 @@ void LinkMicSignalingClient::transitionState(SignalingConnectionState state, con
 }
 
 void LinkMicSignalingClient::sendRegistration() {
-    QJsonObject registerMessage{
-        {"type", "probe.register"},
+    QJsonObject registrationMessage{
+        {"type", kProtocolRegisterType},
         {"room_id", config_.roomKey},
         {"peer_id", config_.userId},
         {"role", "anchor"},
@@ -147,20 +160,21 @@ void LinkMicSignalingClient::sendRegistration() {
     };
 
     if (!config_.displayName.trimmed().isEmpty()) {
-        registerMessage.insert("display_name", config_.displayName);
+        registrationMessage.insert("display_name", config_.displayName);
     }
 
     QJsonObject payload{
         {"client_name", "live_studio_panel"},
         {"display_name", config_.displayName}
     };
-    registerMessage.insert("payload", payload);
+    registrationMessage.insert("payload", payload);
 
-    spdlog::info("[linkmic-ws] send probe.register roomId={} peerId={} role={}",
+    spdlog::info("[linkmic-ws] send signaling.register protocol={} roomId={} peerId={} role={}",
+                 kProtocolRegisterType,
                  toStdString(config_.roomKey),
                  toStdString(config_.userId),
                  "anchor");
-    sendRawMessage(registerMessage);
+    sendRawMessage(registrationMessage);
 }
 
 void LinkMicSignalingClient::handleSocketConnected() {
@@ -209,8 +223,10 @@ void LinkMicSignalingClient::handleSocketTextMessage(const QString& text) {
     }
 
     const QJsonObject message = document.object();
-    spdlog::info("[linkmic-ws] recv type={} roomId={} peerId={}",
-                 toStdString(message.value("type").toString().trimmed()),
+    const QString rawType = message.value("type").toString().trimmed();
+    spdlog::info("[linkmic-ws] recv type={} protocol={} roomId={} peerId={}",
+                 toStdString(displayMessageType(rawType)),
+                 toStdString(rawType),
                  toStdString(message.value("room_id").toString().trimmed()),
                  toStdString(message.value("peer_id").toString().trimmed()));
     if (onObservedMessage_) {

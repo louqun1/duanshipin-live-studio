@@ -11,11 +11,12 @@ int main(int argc, char** argv) {
     app.setApplicationName("live_studio_panel");
     app.setOrganizationName("duanshipin-live-studio");
 
-    const std::filesystem::path projectRoot =
-        std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
+    const QString appDir = app.applicationDirPath();
+    const std::filesystem::path runtimeRoot =
+        appDir.isEmpty() ? std::filesystem::current_path() : std::filesystem::path(appDir.toStdString());
 
     const live_studio::Status loggingStatus =
-        live_studio::logging::initializeDefaultLogger("live_studio_panel", "live_studio_panel.log", projectRoot);
+        live_studio::logging::initializeDefaultLogger("live_studio_panel", "live_studio_panel.log", runtimeRoot);
     if (!loggingStatus.ok()) {
         std::cerr << "failed to initialize logger: " << loggingStatus.message << '\n';
         return 1;

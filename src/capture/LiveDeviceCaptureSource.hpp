@@ -25,6 +25,7 @@ struct LiveDeviceProbeResult {
 
 Status loadLiveDeviceCaptureConfig(const std::string& configPath, media::LiveDeviceCaptureConfig* outConfig);
 Status probeLiveDeviceCaptureConfig(const media::LiveDeviceCaptureConfig& config, LiveDeviceProbeResult* outProbe);
+Status enumerateLiveDeviceCaptureDevices(LiveDeviceProbeResult* outProbe);
 
 enum class CaptureEventKind {
     video,

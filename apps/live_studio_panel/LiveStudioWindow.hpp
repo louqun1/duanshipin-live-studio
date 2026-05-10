@@ -96,6 +96,9 @@ private:
     void setPanelState(PanelState state);
     void switchToSetupPage();
     void switchToLiveRoomPage();
+    [[nodiscard]] bool shouldUseLocalCapturePipeline() const;
+    [[nodiscard]] bool isPublishingSessionActive(
+        const live_studio::session::SessionDiagnostics& diagnostics) const;
     void syncLinkMicTransportFromBusiness();
     void handleBusinessSignalingMessage(const QJsonObject& message);
     void ensureRtcSessionForJoinParams();
@@ -141,6 +144,7 @@ private:
     QImage lastPreviewImage_;
     int lastPreviewFrameIndex_ = -1;
     bool deviceProbeReady_ = false;
+    bool rtcOnlyPublishingActive_ = false;
     live_studio::business::BusinessLiveSnapshot businessSnapshot_;
 
     QStackedWidget* pageStack_ = nullptr;

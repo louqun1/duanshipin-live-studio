@@ -1022,6 +1022,9 @@ Status selectVideoDeviceActivate(const std::string& requestedDeviceId,
     CoTaskMemFree(devices);
 
     if (selectedActivate == nullptr) {
+        if (requestedDeviceId.empty()) {
+            return Status::Ok();
+        }
         return Status::InvalidArgument("camera device not found for Media Foundation: requested=\"" +
                                        requestedDeviceId + "\" offered=" + joinQuotedStrings(*outAvailableNames));
     }
@@ -1655,6 +1658,53 @@ Status probeLiveDeviceCaptureConfig(const media::LiveDeviceCaptureConfig& config
     }
 
     MFShutdown();
+
+    return Status::Ok();
+#endif
+}
+
+Status enumerateLiveDeviceCaptureDevices(LiveDeviceProbeResult* outProbe) {
+    if (outProbe == nullptr) {
+        return Status::InvalidArgument("outProbe is null");
+    }
+
+    *outProbe = LiveDeviceProbeResult{};
+
+#if !defined(_WIN32)
+    return Status::NotImplemented("Media Foundation / WASAPI live capture is only implemented on Windows");
+#else
+    ScopedComApartment apartment;
+    if (FAILED(apartment.hr)) {
+        return hresultStatus("CoInitializeEx(device enumeration)", apartment.hr);
+    }
+
+    {
+        const HRESULT startupHr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
+        if (FAILED(startupHr)) {
+            return hresultStatus("MFStartup(device enumeration)", startupHr);
+        }
+
+        IMFActivate* selectedActivate = nullptr;
+        std::string ignoredSelectedDeviceName;
+        Status status = selectVideoDeviceActivate(
+            std::string(), &selectedActivate, &ignoredSelectedDeviceName, &outProbe->availableVideoDeviceNames);
+        safeRelease(&selectedActivate);
+        MFShutdown();
+        if (!status.ok()) {
+            return status;
+        }
+    }
+
+    {
+        IMMDevice* selectedDevice = nullptr;
+        std::string ignoredSelectedDeviceName;
+        Status status = selectAudioDevice(
+            std::string(), &selectedDevice, &ignoredSelectedDeviceName, &outProbe->availableAudioDeviceNames);
+        safeRelease(&selectedDevice);
+        if (!status.ok()) {
+            return status;
+        }
+    }
 
     return Status::Ok();
 #endif

@@ -172,7 +172,6 @@ LiveStudioWindow::LiveStudioWindow(QWidget* parent) : QMainWindow(parent) {
             this,
             [this]() {
                 linkMicSession_.noteRtcConnected();
-                rtcSignalingBridge_.sendConnected();
                 refreshLinkMicPanel();
             },
             Qt::QueuedConnection);
@@ -363,11 +362,13 @@ void LiveStudioWindow::buildUi() {
             return;
         }
 
-        const QString rtmpUrl = rtmpUrlEdit_->text().trimmed();
-        if (rtmpUrl.isEmpty()) {
-            setPanelState(PanelState::failed);
-            showErrorPrompt("RTMP URL cannot be empty.");
-            return;
+        if (shouldUseLocalCapturePipeline()) {
+            const QString rtmpUrl = rtmpUrlEdit_->text().trimmed();
+            if (rtmpUrl.isEmpty()) {
+                setPanelState(PanelState::failed);
+                showErrorPrompt("RTMP URL cannot be empty when local capture is enabled.");
+                return;
+            }
         }
 
         const auto businessConfig = buildBusinessStartConfig();
@@ -377,6 +378,7 @@ void LiveStudioWindow::buildUi() {
             return;
         }
 
+        rtcOnlyPublishingActive_ = false;
         setPanelState(PanelState::starting);
         statusBar()->showMessage("Logging in and preparing the business live room...", 3000);
         businessClient_->beginStartSequence(businessConfig);
@@ -384,6 +386,28 @@ void LiveStudioWindow::buildUi() {
 
     connect(stopButton_, &QPushButton::clicked, this, [this]() {
         if (operationWatcher_.isRunning()) {
+            return;
+        }
+
+        if (rtcOnlyPublishingActive_) {
+            rtcOnlyPublishingActive_ = false;
+            publishElapsed_.invalidate();
+            rateSnapshot_ = RateSnapshot{};
+            lastPreviewImage_ = QImage{};
+            lastPreviewFrameIndex_ = -1;
+            if (previewLabel_ != nullptr) {
+                previewLabel_->setPixmap(QPixmap());
+                previewLabel_->setText("Preview is idle.\nStart publishing to begin local capture and preview.");
+            }
+            setPanelState(PanelState::stopping);
+            statusBar()->showMessage("Stopping RTC-only live session...", 3000);
+            if (businessClient_ != nullptr) {
+                businessClient_->setPublishingActive(false);
+                businessClient_->beginStopSequence();
+            }
+            showInfoPrompt("RTC-only session stopped. Business room cleanup continues in the background.");
+            switchToSetupPage();
+            refreshBusinessStatus();
             return;
         }
 
@@ -428,7 +452,7 @@ void LiveStudioWindow::buildUi() {
         updateLinkMicActionButtons();
     });
     connect(linkMicTargetUserIdEdit_, &QLineEdit::textChanged, this, [this](const QString&) {
-        refreshLinkMicPanel();
+        updateLinkMicActionButtons();
     });
 
     refreshViewerInfo();
@@ -463,7 +487,7 @@ QWidget* LiveStudioWindow::buildSetupPage(QWidget* parent) {
 
     setupRoomHintValueLabel_ = makeCardValueLabel(
         liveRoomInfoGroup,
-        "Business Room Key must come from the live_room business response, not from an RTMP stream name or probe room_id.");
+        "Business Room Key must come from the live_room business response, not from an RTMP stream name or legacy signaling room_id.");
     liveRoomInfoLayout->addWidget(setupRoomHintValueLabel_, 1, 0, 1, 4);
 
     layout->addWidget(liveRoomInfoGroup);
@@ -540,7 +564,7 @@ QGroupBox* LiveStudioWindow::buildBusinessConfigGroup(QWidget* parent) {
     businessTitleEdit_->setMaximumWidth(360);
 
     auto* hintLabel = new QLabel(
-        "Business Room Key is not an RTMP stream name and is not a probe room_id. It must come from the live_room business response.",
+        "Business Room Key is not an RTMP stream name and is not a legacy signaling room_id. It must come from the live_room business response.",
         group);
     hintLabel->setWordWrap(true);
 
@@ -610,27 +634,14 @@ QGroupBox* LiveStudioWindow::buildSignalingConfigGroup(QWidget* parent) {
     auto* layout = new QGridLayout(group);
     layout->setHorizontalSpacing(10);
     layout->setVerticalSpacing(10);
-    layout->setColumnStretch(3, 1);
-
-    linkMicTargetRoomKeyEdit_ = new QLineEdit(group);
-    linkMicTargetRoomKeyEdit_->setPlaceholderText("target anchor roomKey");
-    linkMicTargetRoomKeyEdit_->setMaximumWidth(260);
-
-    linkMicTargetUserIdEdit_ = new QLineEdit(group);
-    linkMicTargetUserIdEdit_->setPlaceholderText("target anchor userId");
-    linkMicTargetUserIdEdit_->setMaximumWidth(220);
-
-    layout->addWidget(new QLabel("Target Room Key", group), 0, 0);
-    layout->addWidget(linkMicTargetRoomKeyEdit_, 0, 1);
-    layout->addWidget(new QLabel("Target User ID", group), 0, 2);
-    layout->addWidget(linkMicTargetUserIdEdit_, 0, 3);
+    layout->setColumnStretch(0, 1);
 
     auto* hintLabel = new QLabel(
-        "Cross-room invites are sent through the live anchor business WebSocket. "
-        "Do not select members from the current room: enter the remote anchor's roomKey and userId directly.",
+        "Cross-room invites should be started after your anchor has entered the live room. "
+        "Use the live-room sidebar to enter the remote anchor's roomKey and userId, then send Invite from there.",
         group);
     hintLabel->setWordWrap(true);
-    layout->addWidget(hintLabel, 1, 0, 1, 4);
+    layout->addWidget(hintLabel, 0, 0);
 
     return group;
 }
@@ -679,6 +690,73 @@ QWidget* LiveStudioWindow::buildLiveRoomSidebar(QWidget* parent) {
     roomInfoLayout->addWidget(new QLabel("Last Issue", roomInfoGroup), 4, 0);
     businessIssueValueLabel_ = makeCardValueLabel(roomInfoGroup, "none");
     roomInfoLayout->addWidget(businessIssueValueLabel_, 4, 1, 1, 3);
+
+    auto* linkMicGroup = new QGroupBox("Cross-Room Anchor LinkMic", sidebar);
+    auto* linkMicLayout = new QGridLayout(linkMicGroup);
+    linkMicLayout->setHorizontalSpacing(10);
+    linkMicLayout->setVerticalSpacing(10);
+    linkMicLayout->setColumnStretch(1, 1);
+    linkMicLayout->setColumnStretch(3, 1);
+
+    linkMicTargetRoomKeyEdit_ = new QLineEdit(linkMicGroup);
+    linkMicTargetRoomKeyEdit_->setPlaceholderText("target anchor roomKey");
+    linkMicTargetRoomKeyEdit_->setClearButtonEnabled(true);
+    linkMicTargetRoomKeyEdit_->setFocusPolicy(Qt::StrongFocus);
+    linkMicTargetRoomKeyEdit_->setMinimumWidth(220);
+    linkMicTargetRoomKeyEdit_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+    linkMicTargetUserIdEdit_ = new QLineEdit(linkMicGroup);
+    linkMicTargetUserIdEdit_->setPlaceholderText("target anchor userId");
+    linkMicTargetUserIdEdit_->setClearButtonEnabled(true);
+    linkMicTargetUserIdEdit_->setFocusPolicy(Qt::StrongFocus);
+    linkMicTargetUserIdEdit_->setMinimumWidth(180);
+    linkMicTargetUserIdEdit_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+    linkMicLayout->addWidget(new QLabel("Target Room Key", linkMicGroup), 0, 0);
+    linkMicLayout->addWidget(linkMicTargetRoomKeyEdit_, 0, 1);
+    linkMicLayout->addWidget(new QLabel("Target User ID", linkMicGroup), 0, 2);
+    linkMicLayout->addWidget(linkMicTargetUserIdEdit_, 0, 3);
+
+    auto* linkMicHintLabel = new QLabel(
+        "Enter the remote anchor's roomKey and userId here after you are live. "
+        "Invite and Hangup stay in this same cross-room session area.",
+        linkMicGroup);
+    linkMicHintLabel->setWordWrap(true);
+    linkMicLayout->addWidget(linkMicHintLabel, 1, 0, 1, 4);
+
+    auto* linkMicActionLayout = new QGridLayout();
+    linkMicActionLayout->setHorizontalSpacing(8);
+    linkMicActionLayout->setVerticalSpacing(8);
+    linkMicActionLayout->setColumnStretch(0, 1);
+    linkMicActionLayout->setColumnStretch(1, 1);
+    linkMicActionLayout->setColumnStretch(2, 1);
+    linkMicActionLayout->setColumnStretch(3, 1);
+
+    linkMicInviteButton_ = new QPushButton("Invite", linkMicGroup);
+    linkMicInviteButton_->setObjectName("primaryButton");
+    linkMicAcceptButton_ = new QPushButton("Accept", linkMicGroup);
+    linkMicAcceptButton_->setObjectName("primaryButton");
+    linkMicRejectButton_ = new QPushButton("Reject", linkMicGroup);
+    linkMicRejectButton_->setObjectName("secondaryButton");
+    linkMicHangupButton_ = new QPushButton("Hangup", linkMicGroup);
+    linkMicHangupButton_->setObjectName("dangerButton");
+
+    const std::array<QPushButton*, 4> linkMicButtons = {
+        linkMicInviteButton_,
+        linkMicAcceptButton_,
+        linkMicRejectButton_,
+        linkMicHangupButton_,
+    };
+    for (QPushButton* button : linkMicButtons) {
+        button->setMinimumWidth(120);
+        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    }
+
+    linkMicActionLayout->addWidget(linkMicInviteButton_, 0, 0);
+    linkMicActionLayout->addWidget(linkMicAcceptButton_, 0, 1);
+    linkMicActionLayout->addWidget(linkMicRejectButton_, 0, 2);
+    linkMicActionLayout->addWidget(linkMicHangupButton_, 0, 3);
+    linkMicLayout->addLayout(linkMicActionLayout, 2, 0, 1, 4);
 
     auto* stateGroup = new QGroupBox("Stage1 State", sidebar);
     auto* stateLayout = new QGridLayout(stateGroup);
@@ -755,12 +833,6 @@ QWidget* LiveStudioWindow::buildLiveRoomSidebar(QWidget* parent) {
     audienceMemberTable_->setMinimumHeight(180);
     viewersLayout->addWidget(audienceMemberTable_, 1, 0, 1, 2);
 
-    linkMicInviteButton_ = new QPushButton("Invite", viewersGroup);
-    linkMicInviteButton_->setObjectName("primaryButton");
-    linkMicInviteButton_->setMinimumWidth(120);
-    linkMicInviteButton_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    viewersLayout->addWidget(linkMicInviteButton_, 2, 0, 1, 2);
-
     auto* membersGroup = new QGroupBox("RTC LinkMic Members", sidebar);
     auto* membersLayout = new QVBoxLayout(membersGroup);
     membersLayout->setContentsMargins(10, 18, 10, 10);
@@ -779,35 +851,6 @@ QWidget* LiveStudioWindow::buildLiveRoomSidebar(QWidget* parent) {
     linkMicMemberTable_->setAlternatingRowColors(true);
     linkMicMemberTable_->setMinimumHeight(150);
     membersLayout->addWidget(linkMicMemberTable_);
-
-    auto* rtcActionLayout = new QGridLayout();
-    rtcActionLayout->setHorizontalSpacing(8);
-    rtcActionLayout->setVerticalSpacing(8);
-
-    linkMicAcceptButton_ = new QPushButton("Accept", membersGroup);
-    linkMicAcceptButton_->setObjectName("primaryButton");
-    linkMicRejectButton_ = new QPushButton("Reject", membersGroup);
-    linkMicRejectButton_->setObjectName("secondaryButton");
-    linkMicHangupButton_ = new QPushButton("Hangup", membersGroup);
-    linkMicHangupButton_->setObjectName("dangerButton");
-
-    const std::array<QPushButton*, 3> rtcButtons = {
-        linkMicAcceptButton_,
-        linkMicRejectButton_,
-        linkMicHangupButton_,
-    };
-    for (QPushButton* button : rtcButtons) {
-        button->setMinimumWidth(120);
-        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    }
-
-    rtcActionLayout->setColumnStretch(0, 1);
-    rtcActionLayout->setColumnStretch(1, 1);
-    rtcActionLayout->setColumnStretch(2, 1);
-    rtcActionLayout->addWidget(linkMicAcceptButton_, 0, 0);
-    rtcActionLayout->addWidget(linkMicRejectButton_, 0, 1);
-    rtcActionLayout->addWidget(linkMicHangupButton_, 0, 2);
-    membersLayout->addLayout(rtcActionLayout);
 
     auto* eventGroup = new QGroupBox("Event Log", sidebar);
     auto* eventLayout = new QVBoxLayout(eventGroup);
@@ -830,6 +873,7 @@ QWidget* LiveStudioWindow::buildLiveRoomSidebar(QWidget* parent) {
     stopLayout->addWidget(stopButton_);
 
     layout->addWidget(roomInfoGroup);
+    layout->addWidget(linkMicGroup);
     layout->addWidget(stateGroup);
     layout->addWidget(viewersGroup);
     layout->addWidget(membersGroup);
@@ -853,18 +897,8 @@ void LiveStudioWindow::beginDeviceProbe() {
         OperationResult result;
         result.kind = OperationKind::probe_devices;
 
-        live_studio::media::LiveDeviceCaptureConfig config;
-        config.sourceLabel = "live-studio-panel-probe";
-        config.videoDeviceId = "default";
-        config.width = 1280;
-        config.height = 720;
-        config.fps = 30;
-        config.sampleRate = 48000;
-        config.channels = 2;
-        config.frameCount = 1;
-
         live_studio::capture::LiveDeviceProbeResult probe;
-        result.status = live_studio::capture::probeLiveDeviceCaptureConfig(config, &probe);
+        result.status = live_studio::capture::enumerateLiveDeviceCaptureDevices(&probe);
         if (result.status.ok()) {
             result.probe = std::move(probe);
         }
@@ -923,6 +957,7 @@ void LiveStudioWindow::handleProbeResult(const OperationResult& result) {
 
 void LiveStudioWindow::handleStartPublishResult(const OperationResult& result) {
     if (!result.status.ok()) {
+        rtcOnlyPublishingActive_ = false;
         publishElapsed_.invalidate();
         if (businessClient_ != nullptr) {
             businessClient_->setPublishingActive(false);
@@ -949,6 +984,7 @@ void LiveStudioWindow::handleStopPublishResult(const OperationResult& result) {
         return;
     }
 
+    rtcOnlyPublishingActive_ = false;
     publishElapsed_.invalidate();
     if (businessClient_ != nullptr) {
         businessClient_->setPublishingActive(false);
@@ -973,20 +1009,33 @@ void LiveStudioWindow::handleBusinessStateChanged() {
         case live_studio::business::BusinessLiveState::creating_room:
         case live_studio::business::BusinessLiveState::ws_connecting:
         case live_studio::business::BusinessLiveState::ws_connected:
-            setPanelState(PanelState::starting);
+            if (!rtcOnlyPublishingActive_) {
+                setPanelState(PanelState::starting);
+            }
             break;
         case live_studio::business::BusinessLiveState::stopping:
+            rtcOnlyPublishingActive_ = false;
             setPanelState(PanelState::stopping);
             break;
         case live_studio::business::BusinessLiveState::error:
+            rtcOnlyPublishingActive_ = false;
+            publishElapsed_.invalidate();
             setPanelState(PanelState::failed);
             break;
         case live_studio::business::BusinessLiveState::idle:
         case live_studio::business::BusinessLiveState::logged_in:
         case live_studio::business::BusinessLiveState::room_created:
+            if (rtcOnlyPublishingActive_) {
+                rtcOnlyPublishingActive_ = false;
+                publishElapsed_.invalidate();
+                setPanelState(PanelState::idle);
+            } else if (panelState_ != PanelState::publishing) {
+                setPanelState(PanelState::idle);
+            }
+            break;
         case live_studio::business::BusinessLiveState::anchor_online:
         case live_studio::business::BusinessLiveState::reconnecting:
-            if (panelState_ != PanelState::publishing) {
+            if (!rtcOnlyPublishingActive_ && panelState_ != PanelState::publishing) {
                 setPanelState(PanelState::idle);
             }
             break;
@@ -1007,6 +1056,29 @@ void LiveStudioWindow::handleBusinessReadyToPublish() {
         return;
     }
 
+    if (!shouldUseLocalCapturePipeline()) {
+        controller_.close();
+        rtcOnlyPublishingActive_ = true;
+        publishElapsed_.restart();
+        rateSnapshot_ = RateSnapshot{};
+        lastPreviewImage_ = QImage{};
+        lastPreviewFrameIndex_ = -1;
+        if (businessClient_ != nullptr) {
+            businessClient_->setPublishingActive(true);
+        }
+        setPanelState(PanelState::publishing);
+        if (previewLabel_ != nullptr) {
+            previewLabel_->setPixmap(QPixmap());
+            previewLabel_->setText(
+                "Local preview is unavailable.\nRTC-only mode is active because no camera is selected.");
+        }
+        statusBar()->showMessage("Business ready. RTC-only mode is active.", 3000);
+        showInfoPrompt("Business ready. RTC-only mode is active without local capture or RTMP publish.", true);
+        switchToLiveRoomPage();
+        return;
+    }
+
+    rtcOnlyPublishingActive_ = false;
     setPanelState(PanelState::starting);
     statusBar()->showMessage("Business ready. Starting local capture and RTMP publish...", 3000);
     startOperation([this]() {
@@ -1041,9 +1113,8 @@ void LiveStudioWindow::updateButtonStates() {
     const bool businessBusy = live_studio::business::businessStateIsBusy(businessSnapshot_.state);
     const bool busy = operationBusy || businessBusy;
     const live_studio::session::SessionDiagnostics diagnostics = controller_.diagnostics();
-    const bool publishing = diagnostics.publishing;
-    const bool hasVideoSelection =
-        videoDeviceCombo_ != nullptr && !videoDeviceCombo_->currentData().toString().trimmed().isEmpty();
+    const bool publishing = isPublishingSessionActive(diagnostics);
+    const bool localCaptureEnabled = shouldUseLocalCapturePipeline();
     const bool hasRtmpUrl = rtmpUrlEdit_ != nullptr && !rtmpUrlEdit_->text().trimmed().isEmpty();
     const bool hasBusinessConfig =
         apiBaseUrlEdit_ != nullptr && usernameEdit_ != nullptr && passwordEdit_ != nullptr &&
@@ -1086,7 +1157,7 @@ void LiveStudioWindow::updateButtonStates() {
     }
     if (startButton_ != nullptr) {
         startButton_->setEnabled(
-            deviceProbeReady_ && !busy && !publishing && hasVideoSelection && hasRtmpUrl && hasBusinessConfig);
+            deviceProbeReady_ && !busy && !publishing && hasBusinessConfig && (!localCaptureEnabled || hasRtmpUrl));
     }
     if (stopButton_ != nullptr) {
         stopButton_->setEnabled(!operationBusy && publishing);
@@ -1104,7 +1175,7 @@ void LiveStudioWindow::refreshLiveRoomInfo(const live_studio::session::SessionDi
     const QString roomHintText = !businessSnapshot_.roomKey.trimmed().isEmpty()
                                      ? QString("Business Room Key=%1 | signaling=%2")
                                            .arg(businessSnapshot_.roomKey, fallbackText(businessSnapshot_.signalingUrl))
-                                     : QString("Business Room Key will come from the business live_room response, never from RTMP URL or probe room_id.");
+                                     : QString("Business Room Key will come from the business live_room response, never from RTMP URL or legacy signaling room_id.");
     const QString wsStateText = businessSnapshot_.anchorJoined
                                     ? "anchor joined"
                                     : (businessSnapshot_.businessWsConnected
@@ -1319,10 +1390,20 @@ void LiveStudioWindow::switchToLiveRoomPage() {
     renderPreviewImage(lastPreviewImage_);
 }
 
+bool LiveStudioWindow::shouldUseLocalCapturePipeline() const {
+    return videoDeviceCombo_ != nullptr && !videoDeviceCombo_->currentData().toString().trimmed().isEmpty();
+}
+
+bool LiveStudioWindow::isPublishingSessionActive(
+    const live_studio::session::SessionDiagnostics& diagnostics) const {
+    return diagnostics.publishing || rtcOnlyPublishingActive_;
+}
+
 void LiveStudioWindow::refreshPanel() {
     updatePreview();
 
     const live_studio::session::SessionDiagnostics diagnostics = controller_.diagnostics();
+    const bool publishingActive = isPublishingSessionActive(diagnostics);
     const QString currentError = QString::fromStdString(diagnostics.lastError);
     if (!currentError.isEmpty() && currentError != lastErrorText_) {
         showErrorPrompt(QString("Session error: %1").arg(currentError));
@@ -1331,6 +1412,13 @@ void LiveStudioWindow::refreshPanel() {
 
     if (!operationWatcher_.isRunning()) {
         if (diagnostics.publishing) {
+            if (panelState_ != PanelState::publishing) {
+                setPanelState(PanelState::publishing);
+            }
+            if (!publishElapsed_.isValid()) {
+                publishElapsed_.start();
+            }
+        } else if (rtcOnlyPublishingActive_) {
             if (panelState_ != PanelState::publishing) {
                 setPanelState(PanelState::publishing);
             }
@@ -1346,7 +1434,7 @@ void LiveStudioWindow::refreshPanel() {
         }
     }
 
-    if (diagnostics.publishing) {
+    if (publishingActive) {
         switchToLiveRoomPage();
     } else if (pageStack_ != nullptr && pageStack_->currentWidget() == liveRoomPage_ &&
                panelState_ != PanelState::starting && panelState_ != PanelState::stopping) {
@@ -1394,6 +1482,7 @@ void LiveStudioWindow::renderPreviewImage(const QImage& image) {
 }
 
 void LiveStudioWindow::updateStatusSummary(const live_studio::session::SessionDiagnostics& diagnostics) {
+    const bool publishingActive = isPublishingSessionActive(diagnostics);
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     if (rateSnapshot_.sampleTimeMs == 0) {
         rateSnapshot_.sampleTimeMs = nowMs;
@@ -1417,15 +1506,15 @@ void LiveStudioWindow::updateStatusSummary(const live_studio::session::SessionDi
         }
     }
 
-    if (diagnostics.publishing && !publishElapsed_.isValid()) {
+    if (publishingActive && !publishElapsed_.isValid()) {
         publishElapsed_.start();
     }
-    if (!diagnostics.publishing && panelState_ != PanelState::starting) {
+    if (!publishingActive && panelState_ != PanelState::starting) {
         publishElapsed_.invalidate();
     }
 
     const QString durationText =
-        diagnostics.publishing && publishElapsed_.isValid() ? formatDuration(publishElapsed_.elapsed()) : "--";
+        publishingActive && publishElapsed_.isValid() ? formatDuration(publishElapsed_.elapsed()) : "--";
     const QString firstPacketText = diagnostics.firstMediaPacketSent
                                         ? QString("%1 ms").arg(diagnostics.firstMediaLatencyMs, 0, 'f', 1)
                                         : "--";
@@ -1456,12 +1545,19 @@ void LiveStudioWindow::populateCaptureControls(const live_studio::capture::LiveD
     const QSignalBlocker blockSampleRate(sampleRateCombo_);
 
     videoDeviceCombo_->clear();
-    videoDeviceCombo_->addItem("default", "default");
+    videoDeviceCombo_->addItem("none", "");
+    if (!probe.availableVideoDeviceNames.empty()) {
+        videoDeviceCombo_->addItem("default", "default");
+    }
     for (const std::string& deviceName : probe.availableVideoDeviceNames) {
         const QString name = QString::fromStdString(deviceName);
         videoDeviceCombo_->addItem(name, name);
     }
-    selectComboData(videoDeviceCombo_, "default");
+    if (!probe.availableVideoDeviceNames.empty()) {
+        selectComboData(videoDeviceCombo_, "default");
+    } else {
+        selectComboData(videoDeviceCombo_, "");
+    }
 
     audioDeviceCombo_->clear();
     audioDeviceCombo_->addItem("none", "");
@@ -1527,7 +1623,7 @@ void LiveStudioWindow::refreshLinkMicPanel() {
         if (linkMicSession_.usesExternalTransport()) {
             transportText = "business-ws | " + transportText;
         } else {
-            transportText = "debug-probe | " + transportText;
+            transportText = "standalone-ws | " + transportText;
         }
         if (roomState.isRegistered() && roomState.connectionState() == live_studio::linkmic::SignalingConnectionState::connected) {
             transportText += " | registered";
@@ -1697,12 +1793,13 @@ void LiveStudioWindow::renderLinkMicEventLog() {
 }
 
 void LiveStudioWindow::updateLinkMicConnectionControls() {
-    const bool anchorReady = businessSnapshot_.anchorJoined;
     if (linkMicTargetRoomKeyEdit_ != nullptr) {
-        linkMicTargetRoomKeyEdit_->setEnabled(anchorReady);
+        linkMicTargetRoomKeyEdit_->setEnabled(true);
+        linkMicTargetRoomKeyEdit_->setReadOnly(false);
     }
     if (linkMicTargetUserIdEdit_ != nullptr) {
-        linkMicTargetUserIdEdit_->setEnabled(anchorReady);
+        linkMicTargetUserIdEdit_->setEnabled(true);
+        linkMicTargetUserIdEdit_->setReadOnly(false);
     }
 }
 
@@ -1765,7 +1862,7 @@ live_studio::linkmic::LinkMicSessionConfig LiveStudioWindow::buildBusinessLinkMi
     config.roomKey = businessSnapshot_.roomKey.trimmed();
     config.userId = businessSnapshot_.userId > 0 ? QString::number(businessSnapshot_.userId) : QString();
     config.displayName = fallbackText(businessSnapshot_.username, config.userId);
-    config.requestTimeoutMs = 10000;
+    config.requestTimeoutMs = 30000;
     return config;
 }
 

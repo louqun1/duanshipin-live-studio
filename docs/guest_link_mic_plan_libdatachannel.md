@@ -40,7 +40,26 @@ cmake -S . -B build-qt-6103-llvm -G "MinGW Makefiles" `
   -DCMAKE_C_COMPILER=D:/itffmpeg/Qt/Tools/llvm-mingw1706_64/bin/x86_64-w64-mingw32-clang.exe `
   -DCMAKE_CXX_COMPILER=D:/itffmpeg/Qt/Tools/llvm-mingw1706_64/bin/x86_64-w64-mingw32-clang++.exe
 
+# 打包 .exe
+# 1. 重新编译 panel
+cmake --build build-qt-6103-llvm --target live_studio_panel
 
+# 2. 用构建产物覆盖 dist 目录
+robocopy `
+  build-qt-6103-llvm\apps\live_studio_panel `
+  dist\live_studio_panel-portable `
+  /MIR `
+  /XD CMakeFiles live_studio_panel_autogen `
+  /XF Makefile cmake_install.cmake
+
+# 3. 重新打 zip
+if (Test-Path dist\live_studio_panel-portable.zip) {
+    Remove-Item dist\live_studio_panel-portable.zip -Force
+}
+Compress-Archive `
+  -Path dist\live_studio_panel-portable\* `
+  -DestinationPath dist\live_studio_panel-portable.zip `
+  -Force
 
 ## 1. 方案定位
 

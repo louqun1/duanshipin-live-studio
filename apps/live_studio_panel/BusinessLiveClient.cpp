@@ -8,9 +8,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLoggingCategory>
+#include <QMetaObject>
 #include <QNetworkProxy>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QThread>
 #include <QUrl>
 
 #include "spdlog/spdlog.h"
@@ -238,7 +240,23 @@ BusinessLiveClient::~BusinessLiveClient() {
 }
 
 bool BusinessLiveClient::sendSignalingEnvelope(const QJsonObject& object) {
-    return sendSocketJsonMessage(object);
+    if (QThread::currentThread() == thread()) {
+        return sendSocketJsonMessage(object);
+    }
+
+    bool sent = false;
+    const bool invoked = QMetaObject::invokeMethod(
+        this,
+        [this, object, &sent]() {
+            sent = sendSocketJsonMessage(object);
+        },
+        Qt::BlockingQueuedConnection);
+    if (!invoked) {
+        spdlog::error("[business-ws] failed to marshal signaling send to client thread type={}",
+                      toStdString(messageTypeFromJson(object)));
+        return false;
+    }
+    return sent;
 }
 
 void BusinessLiveClient::beginStartSequence(const BusinessStartConfig& config) {
@@ -918,9 +936,11 @@ bool BusinessLiveClient::sendSocketJsonMessage(const QJsonObject& object) {
         return false;
     }
 
-    spdlog::info("[business-ws] send type={} roomKey={} from={} to={} requestId={}",
+    spdlog::info("[business-ws] send type={} sessionId={} roomKey={} toRoomKey={} from={} to={} requestId={}",
                  toStdString(messageTypeFromJson(object)),
+                 toStdString(firstNonEmptyString(object, {"sessionId", "session_id"})),
                  toStdString(firstNonEmptyString(object, {"fromRoomKey", "from_room_key", "roomKey", "room_key"})),
+                 toStdString(firstNonEmptyString(object, {"toRoomKey", "to_room_key"})),
                  toStdString(firstNonEmptyString(object, {"fromUserId", "from_user_id"})),
                  toStdString(firstNonEmptyString(object, {"toUserId", "to_user_id"})),
                  toStdString(firstNonEmptyString(object, {"requestId", "request_id"})));

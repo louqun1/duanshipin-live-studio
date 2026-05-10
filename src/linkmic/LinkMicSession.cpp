@@ -6,6 +6,16 @@
 namespace live_studio::linkmic {
 namespace {
 
+QString displayEventType(const QString& type) {
+    if (type == QLatin1String("probe.register")) {
+        return QStringLiteral("signaling.register");
+    }
+    if (type == QLatin1String("probe.registered")) {
+        return QStringLiteral("signaling.registered");
+    }
+    return type;
+}
+
 QString firstString(const QJsonObject& object, std::initializer_list<const char*> keys) {
     for (const char* key : keys) {
         const QString value = object.value(QLatin1String(key)).toString().trimmed();
@@ -657,7 +667,7 @@ void LinkMicSession::appendEvent(const QString& direction,
     LinkMicEventLogEntry entry;
     entry.timestampUtc = QDateTime::currentDateTimeUtc();
     entry.direction = direction;
-    entry.type = type;
+    entry.type = displayEventType(type);
     entry.detail = detail;
     entry.state = state;
     entry.sessionId = sessionId;
