@@ -1,5 +1,6 @@
 build/
 build-*/
+dist/
 *.exe
 logs/
 third_party/libdatachannel-build-clang/

@@ -87,6 +87,11 @@ void LiveSessionController::close() noexcept {
     }
 }
 
+void LiveSessionController::setMediaTapCallbacks(MediaTapCallbacks callbacks) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->mediaTapCallbacks = std::move(callbacks);
+}
+
 PreviewFrameSnapshot LiveSessionController::latestPreviewFrame() const {
     std::lock_guard<std::mutex> lock(state_->mutex);
     return state_->latestPreviewFrame;

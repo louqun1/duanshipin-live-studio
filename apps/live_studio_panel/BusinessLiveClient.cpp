@@ -12,6 +12,7 @@
 #include <QNetworkProxy>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QStringList>
 #include <QThread>
 #include <QUrl>
 
@@ -27,6 +28,25 @@ constexpr int kReconnectDelayMaxMs = 30000;
 std::string toStdString(const QString& value) {
     const QByteArray utf8 = value.toUtf8();
     return std::string(utf8.constData(), static_cast<std::size_t>(utf8.size()));
+}
+
+QString streamKeyFromRtmpUrl(const QString& value) {
+    const QString trimmed = value.trimmed();
+    if (trimmed.isEmpty()) {
+        return QString();
+    }
+
+    const QUrl url = QUrl::fromUserInput(trimmed);
+    QString path = url.isValid() && !url.path().trimmed().isEmpty() ? url.path() : trimmed;
+    path = path.section('?', 0, 0).section('#', 0, 0).trimmed();
+
+    const QStringList pathParts = path.split('/', Qt::SkipEmptyParts);
+    QString streamKey = pathParts.isEmpty() ? path : pathParts.back();
+    streamKey = streamKey.trimmed();
+    if (streamKey.endsWith(".flv", Qt::CaseInsensitive)) {
+        streamKey.chop(4);
+    }
+    return streamKey.trimmed();
 }
 
 QString parseReplyErrorMessage(const QJsonObject& object, const QByteArray& body, const QString& fallback) {
@@ -197,10 +217,15 @@ BusinessLiveClient::BusinessLiveClient(QObject* parent) : QObject(parent) {
             return;
         }
 
-        const QJsonObject heartbeatObject{
+        QJsonObject heartbeatObject{
             {"type", "live.anchor.heartbeat"},
             {"roomKey", currentRoomKey()},
         };
+        const QString streamKey = streamKeyFromRtmpUrl(startConfig_.rtmpUrl);
+        if (!streamKey.isEmpty()) {
+            heartbeatObject.insert("streamKey", streamKey);
+            heartbeatObject.insert("streamUrl", startConfig_.rtmpUrl.trimmed());
+        }
         socket_.sendTextMessage(QString::fromUtf8(QJsonDocument(heartbeatObject).toJson(QJsonDocument::Compact)));
     });
 
@@ -472,6 +497,11 @@ void BusinessLiveClient::startCreateRoomRequest() {
     if (!startConfig_.title.trimmed().isEmpty()) {
         payload.insert("title", startConfig_.title.trimmed());
     }
+    const QString streamKey = streamKeyFromRtmpUrl(startConfig_.rtmpUrl);
+    if (!streamKey.isEmpty()) {
+        payload.insert("streamKey", streamKey);
+        payload.insert("streamUrl", startConfig_.rtmpUrl.trimmed());
+    }
 
     auto* reply = network_.post(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
@@ -613,12 +643,17 @@ void BusinessLiveClient::sendAnchorJoin() {
         return;
     }
 
-    const QJsonObject joinObject{
+    QJsonObject joinObject{
         {"type", "live.anchor.join"},
         {"token", snapshot_.accessToken},
         {"roomKey", currentRoomKey()},
         {"role", "anchor"},
     };
+    const QString streamKey = streamKeyFromRtmpUrl(startConfig_.rtmpUrl);
+    if (!streamKey.isEmpty()) {
+        joinObject.insert("streamKey", streamKey);
+        joinObject.insert("streamUrl", startConfig_.rtmpUrl.trimmed());
+    }
 
     awaitingJoinAck_ = true;
     joinTimeoutTimer_.start();

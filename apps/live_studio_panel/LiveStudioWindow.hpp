@@ -5,7 +5,6 @@
 
 #include <QElapsedTimer>
 #include <QFutureWatcher>
-#include <QImage>
 #include <QMainWindow>
 #include <QTimer>
 
@@ -25,6 +24,7 @@ class QPushButton;
 class QStackedWidget;
 class QTableWidget;
 class QWidget;
+class VideoOpenGLWidget;
 
 namespace live_studio::business {
 class BusinessLiveClient;
@@ -89,7 +89,6 @@ private:
     void refreshLiveRoomInfo(const live_studio::session::SessionDiagnostics& diagnostics);
     void refreshViewerInfo();
     void updatePreview();
-    void renderPreviewImage(const QImage& image);
     void updateStatusSummary(const live_studio::session::SessionDiagnostics& diagnostics);
     void refreshBusinessStatus();
     void populateCaptureControls(const live_studio::capture::LiveDeviceProbeResult& probe);
@@ -103,6 +102,10 @@ private:
     void handleBusinessSignalingMessage(const QJsonObject& message);
     void ensureRtcSessionForJoinParams();
     void stopRtcSession(const QString& reason);
+    void configureRtcCaptureTap(bool enableSharedCapture);
+    void clearLocalPreviewSurface(const QString& message);
+    void clearRemotePreviewSurface(const QString& message);
+    void presentFrameOnWidget(VideoOpenGLWidget* widget, const live_studio::media::VideoFrame& frame) const;
 
     void refreshLinkMicPanel();
     void populateAudienceMemberTable();
@@ -115,7 +118,6 @@ private:
     [[nodiscard]] live_studio::session::LiveSessionConfig buildSessionConfig() const;
     [[nodiscard]] live_studio::linkmic::LinkMicSessionConfig buildBusinessLinkMicSessionConfig() const;
     [[nodiscard]] live_studio::linkmic::CrossRoomInviteTarget buildInviteTarget() const;
-    [[nodiscard]] static QImage videoFrameToImage(const live_studio::media::VideoFrame& frame);
     [[nodiscard]] static QString panelStateText(PanelState state);
     [[nodiscard]] static QString liveRoomStatusText(PanelState state, bool publishing);
     [[nodiscard]] static QString businessDisplayStateText(
@@ -141,10 +143,10 @@ private:
     PanelState panelState_ = PanelState::idle;
     RateSnapshot rateSnapshot_;
     QString lastErrorText_;
-    QImage lastPreviewImage_;
     int lastPreviewFrameIndex_ = -1;
     bool deviceProbeReady_ = false;
     bool rtcOnlyPublishingActive_ = false;
+    bool rtcUsingSharedCaptureTap_ = false;
     live_studio::business::BusinessLiveSnapshot businessSnapshot_;
 
     QStackedWidget* pageStack_ = nullptr;
@@ -164,7 +166,10 @@ private:
     QComboBox* sampleRateCombo_ = nullptr;
     QPushButton* startButton_ = nullptr;
     QPushButton* stopButton_ = nullptr;
-    QLabel* previewLabel_ = nullptr;
+    VideoOpenGLWidget* localPreviewWidget_ = nullptr;
+    VideoOpenGLWidget* remotePreviewWidget_ = nullptr;
+    QLabel* localPreviewStatusLabel_ = nullptr;
+    QLabel* remotePreviewStatusLabel_ = nullptr;
     QLabel* statusSummaryLabel_ = nullptr;
     QLabel* setupRoomStatusValueLabel_ = nullptr;
     QLabel* setupRoomOnlineCountValueLabel_ = nullptr;

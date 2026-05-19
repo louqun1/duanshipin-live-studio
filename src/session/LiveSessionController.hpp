@@ -53,6 +53,10 @@ struct SessionDiagnostics {
 class LiveSessionController {
 public:
     struct ControllerState;
+    struct MediaTapCallbacks {
+        std::function<void(const media::VideoFrame& frame)> onVideoFrame;
+        std::function<void(const media::AudioFrame& frame)> onAudioFrame;
+    };
 
     LiveSessionController();
     ~LiveSessionController();
@@ -70,6 +74,7 @@ public:
     Status startPublish();
     Status stopPublish();
     void close() noexcept;
+    void setMediaTapCallbacks(MediaTapCallbacks callbacks);
 
     [[nodiscard]] PreviewFrameSnapshot latestPreviewFrame() const;
     [[nodiscard]] AudioLevelSnapshot latestAudioLevel() const;

@@ -27,6 +27,7 @@ struct BusinessStartConfig {
     QString password;
     QString roomKey;
     QString title;
+    QString rtmpUrl;
 
     [[nodiscard]] bool isValid() const {
         return !apiBaseUrl.trimmed().isEmpty() && !username.trimmed().isEmpty() && !password.isEmpty();

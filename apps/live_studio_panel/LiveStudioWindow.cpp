@@ -1,9 +1,11 @@
 #include "LiveStudioWindow.hpp"
 
 #include "BusinessLiveClient.hpp"
+#include "render/VideoOpenGLWidget.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -23,7 +25,6 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPlainTextEdit>
-#include <QPixmap>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
@@ -93,13 +94,14 @@ void selectComboData(QComboBox* combo, const QVariant& desiredData) {
     }
 }
 
-int clampToByte(int value) {
-    return std::clamp(value, 0, 255);
-}
-
 QString fallbackText(const QString& value, const QString& fallback = "--") {
     const QString trimmed = value.trimmed();
     return trimmed.isEmpty() ? fallback : trimmed;
+}
+
+bool environmentFlagEnabled(const char* name) {
+    const QString value = qEnvironmentVariable(name).trimmed().toLower();
+    return value == "1" || value == "true" || value == "yes" || value == "on";
 }
 
 QString roleSummary(const live_studio::linkmic::RoomMember& member) {
@@ -176,6 +178,42 @@ LiveStudioWindow::LiveStudioWindow(QWidget* parent) : QMainWindow(parent) {
             },
             Qt::QueuedConnection);
     };
+    rtcCallbacks.onRemoteVideoFrame = [this](const live_studio::media::VideoFrame& frame) {
+        QMetaObject::invokeMethod(
+            this,
+            [this, frame]() {
+                presentFrameOnWidget(remotePreviewWidget_, frame);
+                if (remotePreviewStatusLabel_ != nullptr) {
+                    remotePreviewStatusLabel_->setText(
+                        QString("Remote live frame #%1  %2 x %3  pts=%4 ms")
+                            .arg(frame.frameIndex)
+                            .arg(frame.width)
+                            .arg(frame.height)
+                            .arg(frame.ptsMs));
+                }
+            },
+            Qt::QueuedConnection);
+    };
+    rtcCallbacks.onRemoteVideoCleared = [this]() {
+        QMetaObject::invokeMethod(
+            this,
+            [this]() {
+                clearRemotePreviewSurface("Remote preview is idle.\nConnect link-mic to render the guest.");
+            },
+            Qt::QueuedConnection);
+    };
+    rtcCallbacks.onLog = [this](const QString& message, bool warning) {
+        if (warning) {
+            QMetaObject::invokeMethod(
+                this,
+                [this, message]() {
+                    if (statusBar() != nullptr) {
+                        statusBar()->showMessage(message, 5000);
+                    }
+                },
+                Qt::QueuedConnection);
+        }
+    };
     rtcPeerSession_.setCallbacks(std::move(rtcCallbacks));
 
     live_studio::rtc::RtcSignalingBridge::Callbacks bridgeCallbacks;
@@ -229,6 +267,7 @@ LiveStudioWindow::~LiveStudioWindow() {
         businessClient_->shutdown();
     }
     linkMicSession_.disconnectFromRoom();
+    configureRtcCaptureTap(false);
     stopRtcSession("window closing");
     controller_.close();
 }
@@ -242,6 +281,7 @@ void LiveStudioWindow::closeEvent(QCloseEvent* event) {
         businessClient_->shutdown();
     }
     linkMicSession_.disconnectFromRoom();
+    configureRtcCaptureTap(false);
     stopRtcSession("window closing");
     controller_.close();
     QMainWindow::closeEvent(event);
@@ -249,7 +289,6 @@ void LiveStudioWindow::closeEvent(QCloseEvent* event) {
 
 void LiveStudioWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event);
-    renderPreviewImage(lastPreviewImage_);
 }
 
 void LiveStudioWindow::buildUi() {
@@ -328,7 +367,7 @@ void LiveStudioWindow::buildUi() {
             background: #b7b0a7;
             color: #f6f1eb;
         }
-        QFrame#previewSurface {
+        QWidget#previewSurface {
             background: #171412;
             border: 1px solid #3a3026;
             border-radius: 12px;
@@ -393,12 +432,8 @@ void LiveStudioWindow::buildUi() {
             rtcOnlyPublishingActive_ = false;
             publishElapsed_.invalidate();
             rateSnapshot_ = RateSnapshot{};
-            lastPreviewImage_ = QImage{};
             lastPreviewFrameIndex_ = -1;
-            if (previewLabel_ != nullptr) {
-                previewLabel_->setPixmap(QPixmap());
-                previewLabel_->setText("Preview is idle.\nStart publishing to begin local capture and preview.");
-            }
+            clearLocalPreviewSurface("Local preview is idle.\nStart publishing to begin local capture and preview.");
             setPanelState(PanelState::stopping);
             statusBar()->showMessage("Stopping RTC-only live session...", 3000);
             if (businessClient_ != nullptr) {
@@ -504,18 +539,56 @@ QWidget* LiveStudioWindow::buildLiveRoomPage(QWidget* parent) {
     auto* splitter = new QSplitter(Qt::Horizontal, page);
     splitter->setChildrenCollapsible(false);
 
-    auto* previewGroup = new QGroupBox("Local Preview", splitter);
+    auto* previewGroup = new QGroupBox("Link-Mic Video", splitter);
     previewGroup->setMinimumWidth(640);
     auto* previewLayout = new QVBoxLayout(previewGroup);
     previewLayout->setContentsMargins(12, 18, 12, 12);
+    previewLayout->setSpacing(12);
 
-    previewLabel_ = new QLabel(previewGroup);
-    previewLabel_->setObjectName("previewSurface");
-    previewLabel_->setAlignment(Qt::AlignCenter);
-    previewLabel_->setMinimumSize(640, 420);
-    previewLabel_->setWordWrap(true);
-    previewLabel_->setText("Preview is idle.\nStart publishing to begin local capture and preview.");
-    previewLayout->addWidget(previewLabel_);
+    auto* videoGrid = new QGridLayout();
+    videoGrid->setHorizontalSpacing(12);
+    videoGrid->setVerticalSpacing(12);
+
+    auto buildVideoPanel = [&](const QString& title,
+                               VideoOpenGLWidget** widgetOut,
+                               QLabel** statusOut) {
+        auto* panel = new QFrame(previewGroup);
+        panel->setObjectName("previewSurface");
+        auto* panelLayout = new QVBoxLayout(panel);
+        panelLayout->setContentsMargins(12, 12, 12, 12);
+        panelLayout->setSpacing(10);
+
+        auto* titleLabel = new QLabel(title, panel);
+        QFont titleFont = titleLabel->font();
+        titleFont.setPointSize(titleFont.pointSize() + 1);
+        titleFont.setBold(true);
+        titleLabel->setFont(titleFont);
+        panelLayout->addWidget(titleLabel);
+
+        auto* widget = new VideoOpenGLWidget(panel);
+        widget->setObjectName("previewSurface");
+        widget->setMinimumSize(320, 240);
+        widget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        panelLayout->addWidget(widget, 1);
+
+        auto* statusLabel = new QLabel(panel);
+        statusLabel->setWordWrap(true);
+        statusLabel->setMinimumHeight(40);
+        panelLayout->addWidget(statusLabel);
+
+        *widgetOut = widget;
+        *statusOut = statusLabel;
+        return panel;
+    };
+
+    videoGrid->addWidget(buildVideoPanel("Local Anchor", &localPreviewWidget_, &localPreviewStatusLabel_), 0, 0);
+    videoGrid->addWidget(buildVideoPanel("Remote Guest", &remotePreviewWidget_, &remotePreviewStatusLabel_), 0, 1);
+    videoGrid->setColumnStretch(0, 1);
+    videoGrid->setColumnStretch(1, 1);
+    previewLayout->addLayout(videoGrid, 1);
+
+    clearLocalPreviewSurface("Local preview is idle.\nStart publishing to begin local capture and preview.");
+    clearRemotePreviewSurface("Remote preview is idle.\nConnect link-mic to render the guest.");
 
     auto* sidebarScrollArea = new QScrollArea(splitter);
     sidebarScrollArea->setWidgetResizable(true);
@@ -1061,17 +1134,12 @@ void LiveStudioWindow::handleBusinessReadyToPublish() {
         rtcOnlyPublishingActive_ = true;
         publishElapsed_.restart();
         rateSnapshot_ = RateSnapshot{};
-        lastPreviewImage_ = QImage{};
         lastPreviewFrameIndex_ = -1;
         if (businessClient_ != nullptr) {
             businessClient_->setPublishingActive(true);
         }
         setPanelState(PanelState::publishing);
-        if (previewLabel_ != nullptr) {
-            previewLabel_->setPixmap(QPixmap());
-            previewLabel_->setText(
-                "Local preview is unavailable.\nRTC-only mode is active because no camera is selected.");
-        }
+        clearLocalPreviewSurface("Local preview is unavailable.\nRTC-only mode is active because no camera is selected.");
         statusBar()->showMessage("Business ready. RTC-only mode is active.", 3000);
         showInfoPrompt("Business ready. RTC-only mode is active without local capture or RTMP publish.", true);
         switchToLiveRoomPage();
@@ -1332,6 +1400,9 @@ void LiveStudioWindow::ensureRtcSessionForJoinParams() {
 
     stopRtcSession("starting new rtc session");
 
+    const live_studio::session::LiveSessionConfig localSessionConfig = buildSessionConfig();
+    const live_studio::session::SessionDiagnostics diagnostics = controller_.diagnostics();
+
     live_studio::rtc::RtcSessionConfig config;
     config.sessionId = joinParams.sessionId;
     config.requestId = joinParams.requestId;
@@ -1351,6 +1422,20 @@ void LiveStudioWindow::ensureRtcSessionForJoinParams() {
     config.iceServers = joinParams.iceServers;
     config.rtcBackend = joinParams.rtcBackend;
     config.mediaMode = joinParams.mediaMode;
+    config.localCapture = localSessionConfig.capture;
+    config.localVideoBitrate = localSessionConfig.videoBitrate;
+    config.localAudioBitrate = localSessionConfig.audioBitrate;
+    config.enableVideoSend = !localSessionConfig.capture.videoDeviceId.empty();
+    config.enableAudioSend = !localSessionConfig.capture.audioDeviceId.empty();
+    config.preferExternalCapture = diagnostics.previewRunning;
+    config.enableDebugAudioDump = environmentFlagEnabled("LIVE_STUDIO_RTC_DEBUG_AUDIO_DUMP");
+    config.enableDebugVideoDump = environmentFlagEnabled("LIVE_STUDIO_RTC_DEBUG_VIDEO_DUMP");
+    if (const QString dumpDir = qEnvironmentVariable("LIVE_STUDIO_RTC_DEBUG_DUMP_DIR").trimmed();
+        !dumpDir.isEmpty()) {
+        config.debugDumpDirectory = dumpDir;
+    }
+
+    clearRemotePreviewSurface("Link-mic connected.\nWaiting for the remote video track to start.");
 
     const bool bridgeStarted = rtcSignalingBridge_.start(
         config,
@@ -1358,17 +1443,38 @@ void LiveStudioWindow::ensureRtcSessionForJoinParams() {
             return businessClient_ != nullptr && businessClient_->sendSignalingEnvelope(envelope);
         });
     if (!bridgeStarted || !rtcPeerSession_.start(config)) {
+        configureRtcCaptureTap(false);
         stopRtcSession("failed to start libdatachannel peer session");
         showErrorPrompt("Failed to start the cross-room libdatachannel session.");
         return;
     }
 
+    configureRtcCaptureTap(config.preferExternalCapture);
     refreshLinkMicPanel();
 }
 
 void LiveStudioWindow::stopRtcSession(const QString& reason) {
+    configureRtcCaptureTap(false);
     rtcSignalingBridge_.stop();
     rtcPeerSession_.stop(reason);
+    clearRemotePreviewSurface("Remote preview is idle.\nConnect link-mic to render the guest.");
+}
+
+void LiveStudioWindow::configureRtcCaptureTap(bool enableSharedCapture) {
+    rtcUsingSharedCaptureTap_ = enableSharedCapture;
+    if (!enableSharedCapture) {
+        controller_.setMediaTapCallbacks({});
+        return;
+    }
+
+    live_studio::session::LiveSessionController::MediaTapCallbacks callbacks;
+    callbacks.onVideoFrame = [this](const live_studio::media::VideoFrame& frame) {
+        rtcPeerSession_.pushLocalVideoFrame(frame);
+    };
+    callbacks.onAudioFrame = [this](const live_studio::media::AudioFrame& frame) {
+        rtcPeerSession_.pushLocalAudioFrame(frame);
+    };
+    controller_.setMediaTapCallbacks(std::move(callbacks));
 }
 
 void LiveStudioWindow::switchToSetupPage() {
@@ -1387,7 +1493,6 @@ void LiveStudioWindow::switchToLiveRoomPage() {
     if (pageStack_->currentWidget() != liveRoomPage_) {
         pageStack_->setCurrentWidget(liveRoomPage_);
     }
-    renderPreviewImage(lastPreviewImage_);
 }
 
 bool LiveStudioWindow::shouldUseLocalCapturePipeline() const {
@@ -1453,32 +1558,79 @@ void LiveStudioWindow::updatePreview() {
         return;
     }
 
-    QImage converted = videoFrameToImage(snapshot.frame);
-    if (converted.isNull()) {
-        return;
-    }
-
     lastPreviewFrameIndex_ = snapshot.frame.frameIndex;
-    lastPreviewImage_ = std::move(converted);
-    renderPreviewImage(lastPreviewImage_);
+    presentFrameOnWidget(localPreviewWidget_, snapshot.frame);
+    if (localPreviewStatusLabel_ != nullptr) {
+        localPreviewStatusLabel_->setText(
+            QString("Local preview frame #%1  %2 x %3  pts=%4 ms")
+                .arg(snapshot.frame.frameIndex)
+                .arg(snapshot.frame.width)
+                .arg(snapshot.frame.height)
+                .arg(snapshot.frame.ptsMs));
+    }
 }
 
-void LiveStudioWindow::renderPreviewImage(const QImage& image) {
-    if (previewLabel_ == nullptr || image.isNull()) {
+void LiveStudioWindow::presentFrameOnWidget(VideoOpenGLWidget* widget,
+                                            const live_studio::media::VideoFrame& frame) const {
+    if (widget == nullptr || !frame.hasPixelPayload ||
+        frame.pixelFormat != live_studio::media::VideoPixelFormat::yuv420p ||
+        frame.width <= 0 || frame.height <= 0 ||
+        frame.lineStrideY <= 0 || frame.lineStrideU <= 0 || frame.lineStrideV <= 0) {
         return;
     }
 
-    const QSize targetSize = previewLabel_->contentsRect().size();
-    const QPixmap sourcePixmap = QPixmap::fromImage(image);
-    if (!targetSize.isValid()) {
-        previewLabel_->setPixmap(sourcePixmap);
-        previewLabel_->setText(QString());
+    const int chromaWidth = (frame.width + 1) / 2;
+    const int chromaHeight = (frame.height + 1) / 2;
+    const std::size_t yPlaneSize = static_cast<std::size_t>(frame.lineStrideY) * static_cast<std::size_t>(frame.height);
+    const std::size_t uPlaneSize = static_cast<std::size_t>(frame.lineStrideU) * static_cast<std::size_t>(chromaHeight);
+    const std::size_t vPlaneSize = static_cast<std::size_t>(frame.lineStrideV) * static_cast<std::size_t>(chromaHeight);
+    if (frame.pixelPayload.size() < yPlaneSize + uPlaneSize + vPlaneSize) {
         return;
     }
 
-    previewLabel_->setPixmap(
-        sourcePixmap.scaled(targetSize, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    previewLabel_->setText(QString());
+    const auto* yPlane = frame.pixelPayload.data();
+    const auto* uPlane = yPlane + yPlaneSize;
+    const auto* vPlane = uPlane + uPlaneSize;
+
+    auto copyPlane = [](const std::uint8_t* source, int stride, int width, int height) {
+        QByteArray plane(width * height, Qt::Uninitialized);
+        auto* destination = reinterpret_cast<std::uint8_t*>(plane.data());
+        for (int row = 0; row < height; ++row) {
+            std::memcpy(destination + (row * width),
+                        source + static_cast<std::size_t>(row) * static_cast<std::size_t>(stride),
+                        static_cast<std::size_t>(width));
+        }
+        return plane;
+    };
+
+    const int colorMatrix = (frame.width >= 1280 || frame.height > 576)
+        ? static_cast<int>(VideoOpenGLWidget::ColorMatrix::Bt709)
+        : static_cast<int>(VideoOpenGLWidget::ColorMatrix::Bt601);
+    widget->presentFrame(frame.width,
+                         frame.height,
+                         copyPlane(yPlane, frame.lineStrideY, frame.width, frame.height),
+                         copyPlane(uPlane, frame.lineStrideU, chromaWidth, chromaHeight),
+                         copyPlane(vPlane, frame.lineStrideV, chromaWidth, chromaHeight),
+                         colorMatrix,
+                         false);
+}
+
+void LiveStudioWindow::clearLocalPreviewSurface(const QString& message) {
+    if (localPreviewWidget_ != nullptr) {
+        localPreviewWidget_->clearFrame();
+    }
+    if (localPreviewStatusLabel_ != nullptr) {
+        localPreviewStatusLabel_->setText(message);
+    }
+}
+
+void LiveStudioWindow::clearRemotePreviewSurface(const QString& message) {
+    if (remotePreviewWidget_ != nullptr) {
+        remotePreviewWidget_->clearFrame();
+    }
+    if (remotePreviewStatusLabel_ != nullptr) {
+        remotePreviewStatusLabel_->setText(message);
+    }
 }
 
 void LiveStudioWindow::updateStatusSummary(const live_studio::session::SessionDiagnostics& diagnostics) {
@@ -1831,6 +1983,9 @@ live_studio::business::BusinessStartConfig LiveStudioWindow::buildBusinessStartC
     config.password = passwordEdit_ != nullptr ? passwordEdit_->text() : QString();
     config.roomKey = businessRoomKeyEdit_ != nullptr ? businessRoomKeyEdit_->text().trimmed() : QString();
     config.title = businessTitleEdit_ != nullptr ? businessTitleEdit_->text().trimmed() : QString();
+    if (shouldUseLocalCapturePipeline() && rtmpUrlEdit_ != nullptr) {
+        config.rtmpUrl = rtmpUrlEdit_->text().trimmed();
+    }
     return config;
 }
 
@@ -1871,53 +2026,6 @@ live_studio::linkmic::CrossRoomInviteTarget LiveStudioWindow::buildInviteTarget(
     target.roomKey = linkMicTargetRoomKeyEdit_ != nullptr ? linkMicTargetRoomKeyEdit_->text().trimmed() : QString();
     target.userId = linkMicTargetUserIdEdit_ != nullptr ? linkMicTargetUserIdEdit_->text().trimmed() : QString();
     return target;
-}
-
-QImage LiveStudioWindow::videoFrameToImage(const live_studio::media::VideoFrame& frame) {
-    if (!frame.hasPixelPayload || frame.pixelFormat != live_studio::media::VideoPixelFormat::yuv420p ||
-        frame.width <= 0 || frame.height <= 0 || frame.lineStrideY <= 0 || frame.lineStrideU <= 0 ||
-        frame.lineStrideV <= 0) {
-        return {};
-    }
-
-    const std::size_t yPlaneSize = static_cast<std::size_t>(frame.lineStrideY) * static_cast<std::size_t>(frame.height);
-    const std::size_t uvHeight = static_cast<std::size_t>((frame.height + 1) / 2);
-    const std::size_t uPlaneSize = static_cast<std::size_t>(frame.lineStrideU) * uvHeight;
-    const std::size_t vPlaneSize = static_cast<std::size_t>(frame.lineStrideV) * uvHeight;
-    if (frame.pixelPayload.size() < yPlaneSize + uPlaneSize + vPlaneSize) {
-        return {};
-    }
-
-    const auto* yPlane = frame.pixelPayload.data();
-    const auto* uPlane = yPlane + yPlaneSize;
-    const auto* vPlane = uPlane + uPlaneSize;
-
-    QImage image(frame.width, frame.height, QImage::Format_RGB32);
-    if (image.isNull()) {
-        return {};
-    }
-
-    for (int row = 0; row < frame.height; ++row) {
-        auto* destination = reinterpret_cast<QRgb*>(image.scanLine(row));
-        const int uvRow = row / 2;
-        for (int column = 0; column < frame.width; ++column) {
-            const int uvColumn = column / 2;
-
-            const int yValue = static_cast<int>(yPlane[row * frame.lineStrideY + column]);
-            const int uValue = static_cast<int>(uPlane[uvRow * frame.lineStrideU + uvColumn]);
-            const int vValue = static_cast<int>(vPlane[uvRow * frame.lineStrideV + uvColumn]);
-
-            const int c = std::max(0, yValue - 16);
-            const int d = uValue - 128;
-            const int e = vValue - 128;
-            const int red = clampToByte((298 * c + 409 * e + 128) >> 8);
-            const int green = clampToByte((298 * c - 100 * d - 208 * e + 128) >> 8);
-            const int blue = clampToByte((298 * c + 516 * d + 128) >> 8);
-            destination[column] = qRgb(red, green, blue);
-        }
-    }
-
-    return image;
 }
 
 QString LiveStudioWindow::panelStateText(PanelState state) {

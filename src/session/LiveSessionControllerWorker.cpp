@@ -42,6 +42,15 @@ void workerMain(LiveSessionController::ControllerState* state) {
 
         const int pendingEvents = state->captureSource.pendingEventCount();
         if (event.kind == capture::CaptureEventKind::video) {
+            LiveSessionController::MediaTapCallbacks mediaTapCallbacks;
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                mediaTapCallbacks = state->mediaTapCallbacks;
+            }
+            if (mediaTapCallbacks.onVideoFrame) {
+                mediaTapCallbacks.onVideoFrame(event.videoFrame);
+            }
+
             const int frameIndex = event.videoFrame.frameIndex;
             const std::int64_t ptsMs = event.videoFrame.ptsMs;
             const std::int64_t captureWallClockNs = event.videoFrame.captureWallClockNs;
@@ -117,6 +126,15 @@ void workerMain(LiveSessionController::ControllerState* state) {
                 pushTrace(state->trace, "publish-video-stats", videoPerfTrace);
             }
         } else {
+            LiveSessionController::MediaTapCallbacks mediaTapCallbacks;
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                mediaTapCallbacks = state->mediaTapCallbacks;
+            }
+            if (mediaTapCallbacks.onAudioFrame) {
+                mediaTapCallbacks.onAudioFrame(event.audioFrame);
+            }
+
             const int frameIndex = event.audioFrame.frameIndex;
             const std::int64_t ptsMs = event.audioFrame.ptsMs;
             const std::int64_t captureWallClockNs = event.audioFrame.captureWallClockNs;

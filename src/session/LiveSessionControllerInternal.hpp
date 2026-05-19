@@ -407,6 +407,7 @@ struct LiveSessionController::ControllerState {
     AudioLevelSnapshot latestAudioLevel;
     SessionDiagnostics diagnostics;
     capture::LiveDeviceCaptureSource captureSource;
+    LiveSessionController::MediaTapCallbacks mediaTapCallbacks;
     std::thread workerThread;
     bool workerStopRequested = false;
     bool workerThreadRunning = false;

@@ -82,6 +82,7 @@ endfunction()
 set(LIVE_STUDIO_FFMPEG_ROOT "${CMAKE_SOURCE_DIR}/third_party/ffmpeg6.0")
 
 set(LIVE_STUDIO_FFMPEG_INCLUDE_DIR "${LIVE_STUDIO_FFMPEG_ROOT}/include")
+set(LIVE_STUDIO_SDL2_INCLUDE_DIR "${LIVE_STUDIO_FFMPEG_ROOT}/include/SDL2")
 
 live_studio_import_shared_library(
     FFmpeg::avcodec
@@ -112,6 +113,11 @@ live_studio_import_shared_library(
     FFmpeg::swscale
     "${LIVE_STUDIO_FFMPEG_ROOT}/lib/swscale.lib"
     "${LIVE_STUDIO_FFMPEG_ROOT}/bin/swscale-7.dll"
+)
+live_studio_import_shared_library(
+    SDL2::SDL2
+    "${LIVE_STUDIO_FFMPEG_ROOT}/lib/SDL2.lib"
+    "${LIVE_STUDIO_FFMPEG_ROOT}/bin/SDL2.dll"
 )
 
 message(STATUS "duanshipin-live-studio FFmpeg root: ${LIVE_STUDIO_FFMPEG_ROOT}")
@@ -180,7 +186,7 @@ if(LIVE_STUDIO_BUILD_QT_PANEL)
             "D:/itffmpeg/Qt/Tools/llvm-mingw1706_64/bin/clang++.exe and clang.exe.")
     endif()
 
-    find_package(Qt6 COMPONENTS Core Gui Widgets Concurrent Network QUIET)
+    find_package(Qt6 COMPONENTS Core Gui Widgets Concurrent Network OpenGL OpenGLWidgets QUIET)
     if(Qt6_FOUND)
         add_subdirectory(apps/live_studio_panel)
     else()

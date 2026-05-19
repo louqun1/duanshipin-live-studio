@@ -1,5 +1,6 @@
 if(NOT TARGET Qt6::Core OR NOT TARGET Qt6::Gui OR NOT TARGET Qt6::Widgets OR
-   NOT TARGET Qt6::Concurrent OR NOT TARGET Qt6::Network)
+   NOT TARGET Qt6::Concurrent OR NOT TARGET Qt6::Network OR
+   NOT TARGET Qt6::OpenGL OR NOT TARGET Qt6::OpenGLWidgets)
     message(WARNING "Skipping live_studio_panel because required Qt6 base modules are missing.")
     return()
 endif()
@@ -19,17 +20,29 @@ add_executable(live_studio_panel
     LiveStudioWindow.cpp
     LiveStudioWindow.hpp
     main.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/SdlAudioOutput.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/SdlAudioOutput.hpp
+    ${CMAKE_SOURCE_DIR}/src/decode/H264VideoDecoder.cpp
+    ${CMAKE_SOURCE_DIR}/src/decode/H264VideoDecoder.hpp
+    ${CMAKE_SOURCE_DIR}/src/render/VideoOpenGLWidget.cpp
+    ${CMAKE_SOURCE_DIR}/src/render/VideoOpenGLWidget.hpp
     ${CMAKE_SOURCE_DIR}/src/linkmic/LinkMicRoomState.cpp
     ${CMAKE_SOURCE_DIR}/src/linkmic/LinkMicSession.cpp
     ${CMAKE_SOURCE_DIR}/src/linkmic/LinkMicSignalingClient.cpp
     ${CMAKE_SOURCE_DIR}/src/linkmic/RoomMemberDirectory.cpp
     ${CMAKE_SOURCE_DIR}/src/rtc/RtcSignalingBridge.cpp
+    ${CMAKE_SOURCE_DIR}/src/rtc/RtcRemoteAudioSink.cpp
+    ${CMAKE_SOURCE_DIR}/src/rtc/RtcRemoteAudioSink.hpp
+    ${CMAKE_SOURCE_DIR}/src/rtc/RtcRemoteVideoSink.cpp
+    ${CMAKE_SOURCE_DIR}/src/rtc/RtcRemoteVideoSink.hpp
     ${CMAKE_SOURCE_DIR}/src/rtc/RtcPeerSession.cpp
 )
 
 target_include_directories(live_studio_panel
     PRIVATE
+        ${LIVE_STUDIO_FFMPEG_INCLUDE_DIR}
         ${LIVE_STUDIO_SPDLOG_INCLUDE_DIR}
+        ${LIVE_STUDIO_SDL2_INCLUDE_DIR}
 )
 
 target_link_libraries(live_studio_panel
@@ -38,9 +51,12 @@ target_link_libraries(live_studio_panel
         Qt6::Core
         Qt6::Gui
         Qt6::Network
+        Qt6::OpenGL
+        Qt6::OpenGLWidgets
         Qt6::WebSockets
         Qt6::Widgets
         LibDataChannel::LibDataChannel
+        SDL2::SDL2
         live_studio_core
 )
 
