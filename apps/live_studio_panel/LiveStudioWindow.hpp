@@ -15,6 +15,8 @@
 #include "rtc/RtcSignalingBridge.hpp"
 #include "session/LiveSessionController.hpp"
 
+class QFrame;
+class QGridLayout;
 class QComboBox;
 class QGroupBox;
 class QLabel;
@@ -168,6 +170,8 @@ private:
     QPushButton* stopButton_ = nullptr;
     VideoOpenGLWidget* localPreviewWidget_ = nullptr;
     VideoOpenGLWidget* remotePreviewWidget_ = nullptr;
+    QFrame* remotePreviewPanel_ = nullptr;
+    QGridLayout* videoGrid_ = nullptr;
     QLabel* localPreviewStatusLabel_ = nullptr;
     QLabel* remotePreviewStatusLabel_ = nullptr;
     QLabel* statusSummaryLabel_ = nullptr;

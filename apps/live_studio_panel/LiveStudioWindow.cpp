@@ -1,4 +1,4 @@
-﻿#include "LiveStudioWindow.hpp"
+#include "LiveStudioWindow.hpp"
 
 #include "BusinessLiveClient.hpp"
 #include "render/VideoOpenGLWidget.hpp"
@@ -568,9 +568,9 @@ QWidget* LiveStudioWindow::buildLiveRoomPage(QWidget* parent) {
     previewLayout->setContentsMargins(12, 18, 12, 12);
     previewLayout->setSpacing(12);
 
-    auto* videoGrid = new QGridLayout();
-    videoGrid->setHorizontalSpacing(12);
-    videoGrid->setVerticalSpacing(12);
+    videoGrid_ = new QGridLayout();
+    videoGrid_->setHorizontalSpacing(12);
+    videoGrid_->setVerticalSpacing(12);
 
     auto buildVideoPanel = [&](const QString& title,
                                VideoOpenGLWidget** widgetOut,
@@ -604,11 +604,13 @@ QWidget* LiveStudioWindow::buildLiveRoomPage(QWidget* parent) {
         return panel;
     };
 
-    videoGrid->addWidget(buildVideoPanel("Local Anchor", &localPreviewWidget_, &localPreviewStatusLabel_), 0, 0);
-    videoGrid->addWidget(buildVideoPanel(QStringLiteral("远端嘉宾"), &remotePreviewWidget_, &remotePreviewStatusLabel_), 0, 1);
-    videoGrid->setColumnStretch(0, 1);
-    videoGrid->setColumnStretch(1, 1);
-    previewLayout->addLayout(videoGrid, 1);
+    videoGrid_->addWidget(buildVideoPanel("Local Anchor", &localPreviewWidget_, &localPreviewStatusLabel_), 0, 0);
+    remotePreviewPanel_ = buildVideoPanel(QStringLiteral("远端嘉宾"), &remotePreviewWidget_, &remotePreviewStatusLabel_);
+    videoGrid_->addWidget(remotePreviewPanel_, 0, 1);
+    remotePreviewPanel_->hide();
+    videoGrid_->setColumnStretch(0, 1);
+    videoGrid_->setColumnStretch(1, 0);
+    previewLayout->addLayout(videoGrid_, 1);
 
     clearLocalPreviewSurface(QStringLiteral("本地预览空闲。\\n开始推流后将显示本地采集画面。"));
     clearRemotePreviewSurface(QStringLiteral("远端预览空闲。\\n建立连麦后将显示嘉宾画面。"));
@@ -1457,6 +1459,12 @@ void LiveStudioWindow::ensureRtcSessionForJoinParams() {
     }
 
     clearRemotePreviewSurface("Link-mic connected.\nWaiting for the remote video track to start.");
+    if (remotePreviewPanel_ != nullptr) {
+        remotePreviewPanel_->show();
+        if (videoGrid_ != nullptr) {
+            videoGrid_->setColumnStretch(1, 1);
+        }
+    }
 
     const bool bridgeStarted = rtcSignalingBridge_.start(
         config,
@@ -1479,6 +1487,12 @@ void LiveStudioWindow::stopRtcSession(const QString& reason) {
     rtcSignalingBridge_.stop();
     rtcPeerSession_.stop(reason);
     clearRemotePreviewSurface(QStringLiteral("远端预览空闲。\\n建立连麦后将显示嘉宾画面。"));
+    if (remotePreviewPanel_ != nullptr) {
+        if (videoGrid_ != nullptr) {
+            videoGrid_->setColumnStretch(1, 0);
+        }
+        remotePreviewPanel_->hide();
+    }
 }
 
 void LiveStudioWindow::configureRtcCaptureTap(bool enableSharedCapture) {
