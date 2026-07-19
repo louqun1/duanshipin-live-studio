@@ -1,4 +1,4 @@
-#include "LiveStudioWindow.hpp"
+﻿#include "LiveStudioWindow.hpp"
 
 #include "BusinessLiveClient.hpp"
 #include "render/VideoOpenGLWidget.hpp"
@@ -27,6 +27,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QSettings>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSignalBlocker>
@@ -152,6 +153,20 @@ LiveStudioWindow::LiveStudioWindow(QWidget* parent) : QMainWindow(parent) {
     businessClient_ = new live_studio::business::BusinessLiveClient(this);
     buildUi();
     buildStatusBar();
+
+    QSettings settings(QStringLiteral("LiveStudio"), QStringLiteral("Panel"));
+    settings.beginGroup(QStringLiteral("Config"));
+    if (settings.contains(QStringLiteral("apiBaseUrl"))) {
+        apiBaseUrlEdit_->setText(settings.value(QStringLiteral("apiBaseUrl")).toString());
+    }
+    if (settings.contains(QStringLiteral("username"))) {
+        usernameEdit_->setText(settings.value(QStringLiteral("username")).toString());
+    }
+    if (settings.contains(QStringLiteral("rtmpUrl"))) {
+        rtmpUrlEdit_->setText(settings.value(QStringLiteral("rtmpUrl")).toString());
+    }
+    settings.endGroup();
+
     businessSnapshot_ = businessClient_->snapshot();
 
     linkMicSession_.setUpdateHandler([this]() {
@@ -185,7 +200,7 @@ LiveStudioWindow::LiveStudioWindow(QWidget* parent) : QMainWindow(parent) {
                 presentFrameOnWidget(remotePreviewWidget_, frame);
                 if (remotePreviewStatusLabel_ != nullptr) {
                     remotePreviewStatusLabel_->setText(
-                        QString("Remote live frame #%1  %2 x %3  pts=%4 ms")
+                        QStringLiteral("远端画面 #%1  %2 x %3  pts=%4 ms")
                             .arg(frame.frameIndex)
                             .arg(frame.width)
                             .arg(frame.height)
@@ -198,7 +213,7 @@ LiveStudioWindow::LiveStudioWindow(QWidget* parent) : QMainWindow(parent) {
         QMetaObject::invokeMethod(
             this,
             [this]() {
-                clearRemotePreviewSurface("Remote preview is idle.\nConnect link-mic to render the guest.");
+                clearRemotePreviewSurface(QStringLiteral("远端预览空闲。\\n建立连麦后将显示嘉宾画面。"));
             },
             Qt::QueuedConnection);
     };
@@ -292,7 +307,7 @@ void LiveStudioWindow::resizeEvent(QResizeEvent* event) {
 }
 
 void LiveStudioWindow::buildUi() {
-    setWindowTitle("Live Studio Panel");
+    setWindowTitle(QStringLiteral("直播工作室"));
     resize(1600, 920);
     setMinimumSize(1380, 820);
     setStyleSheet(R"(
@@ -405,7 +420,7 @@ void LiveStudioWindow::buildUi() {
             const QString rtmpUrl = rtmpUrlEdit_->text().trimmed();
             if (rtmpUrl.isEmpty()) {
                 setPanelState(PanelState::failed);
-                showErrorPrompt("RTMP URL cannot be empty when local capture is enabled.");
+                showErrorPrompt(QStringLiteral("本地采集模式下 RTMP 地址不能为空。"));
                 return;
             }
         }
@@ -413,13 +428,21 @@ void LiveStudioWindow::buildUi() {
         const auto businessConfig = buildBusinessStartConfig();
         if (!businessConfig.isValid()) {
             setPanelState(PanelState::failed);
-            showErrorPrompt("API Base URL, username, and password are required.");
+            showErrorPrompt(QStringLiteral("API 地址、用户名和密码为必填项。"));
             return;
         }
 
         rtcOnlyPublishingActive_ = false;
+        {
+            QSettings settings(QStringLiteral("LiveStudio"), QStringLiteral("Panel"));
+            settings.beginGroup(QStringLiteral("Config"));
+            settings.setValue(QStringLiteral("apiBaseUrl"), apiBaseUrlEdit_->text().trimmed());
+            settings.setValue(QStringLiteral("username"), usernameEdit_->text().trimmed());
+            settings.setValue(QStringLiteral("rtmpUrl"), rtmpUrlEdit_->text().trimmed());
+            settings.endGroup();
+        }
         setPanelState(PanelState::starting);
-        statusBar()->showMessage("Logging in and preparing the business live room...", 3000);
+        statusBar()->showMessage(QStringLiteral("正在登录并准备直播间..."), 3000);
         businessClient_->beginStartSequence(businessConfig);
     });
 
@@ -433,21 +456,21 @@ void LiveStudioWindow::buildUi() {
             publishElapsed_.invalidate();
             rateSnapshot_ = RateSnapshot{};
             lastPreviewFrameIndex_ = -1;
-            clearLocalPreviewSurface("Local preview is idle.\nStart publishing to begin local capture and preview.");
+            clearLocalPreviewSurface(QStringLiteral("本地预览空闲。\\n开始推流后将显示本地采集画面。"));
             setPanelState(PanelState::stopping);
-            statusBar()->showMessage("Stopping RTC-only live session...", 3000);
+            statusBar()->showMessage(QStringLiteral("正在停止 RTC 会话..."), 3000);
             if (businessClient_ != nullptr) {
                 businessClient_->setPublishingActive(false);
                 businessClient_->beginStopSequence();
             }
-            showInfoPrompt("RTC-only session stopped. Business room cleanup continues in the background.");
+            showInfoPrompt(QStringLiteral("RTC 会话已停止，后台正在清理直播间。"));
             switchToSetupPage();
             refreshBusinessStatus();
             return;
         }
 
         setPanelState(PanelState::stopping);
-        statusBar()->showMessage("Stopping publish...", 3000);
+        statusBar()->showMessage(QStringLiteral("正在停止推流..."), 3000);
         startOperation([this]() {
             OperationResult result;
             result.kind = OperationKind::stop_publish;
@@ -459,25 +482,25 @@ void LiveStudioWindow::buildUi() {
     connect(linkMicInviteButton_, &QPushButton::clicked, this, [this]() {
         const auto target = buildInviteTarget();
         if (!linkMicSession_.invite(target.roomKey, target.userId)) {
-            showInfoPrompt("Invite is unavailable in the current state.");
+            showInfoPrompt(QStringLiteral("当前状态下不可发送邀请。"));
         }
     });
 
     connect(linkMicAcceptButton_, &QPushButton::clicked, this, [this]() {
         if (!linkMicSession_.accept()) {
-            showInfoPrompt("Accept is unavailable in the current state.");
+            showInfoPrompt(QStringLiteral("当前状态下不可接受邀请。"));
         }
     });
 
     connect(linkMicRejectButton_, &QPushButton::clicked, this, [this]() {
         if (!linkMicSession_.reject()) {
-            showInfoPrompt("Reject is unavailable in the current state.");
+            showInfoPrompt(QStringLiteral("当前状态下不可拒绝邀请。"));
         }
     });
 
     connect(linkMicHangupButton_, &QPushButton::clicked, this, [this]() {
         if (!linkMicSession_.hangup()) {
-            showInfoPrompt("Hangup is unavailable in the current state.");
+            showInfoPrompt(QStringLiteral("当前状态下不可挂断。"));
             return;
         }
         stopRtcSession("manual hangup");
@@ -505,18 +528,18 @@ QWidget* LiveStudioWindow::buildSetupPage(QWidget* parent) {
     layout->addWidget(buildPublishConfigGroup(page));
     layout->addWidget(buildSignalingConfigGroup(page));
 
-    auto* liveRoomInfoGroup = new QGroupBox("Business Live State", page);
+    auto* liveRoomInfoGroup = new QGroupBox(QStringLiteral("业务直播状态"), page);
     auto* liveRoomInfoLayout = new QGridLayout(liveRoomInfoGroup);
     liveRoomInfoLayout->setHorizontalSpacing(10);
     liveRoomInfoLayout->setVerticalSpacing(10);
     liveRoomInfoLayout->setColumnStretch(1, 1);
     liveRoomInfoLayout->setColumnStretch(3, 1);
 
-    liveRoomInfoLayout->addWidget(new QLabel("Business Status", liveRoomInfoGroup), 0, 0);
-    setupRoomStatusValueLabel_ = makeCardValueLabel(liveRoomInfoGroup, "Not logged in");
+    liveRoomInfoLayout->addWidget(new QLabel(QStringLiteral("业务状态"), liveRoomInfoGroup), 0, 0);
+    setupRoomStatusValueLabel_ = makeCardValueLabel(liveRoomInfoGroup, QStringLiteral("未登录"));
     liveRoomInfoLayout->addWidget(setupRoomStatusValueLabel_, 0, 1);
 
-    liveRoomInfoLayout->addWidget(new QLabel("Online Count", liveRoomInfoGroup), 0, 2);
+    liveRoomInfoLayout->addWidget(new QLabel(QStringLiteral("在线人数"), liveRoomInfoGroup), 0, 2);
     setupRoomOnlineCountValueLabel_ = makeCardValueLabel(liveRoomInfoGroup, "0");
     liveRoomInfoLayout->addWidget(setupRoomOnlineCountValueLabel_, 0, 3);
 
@@ -539,7 +562,7 @@ QWidget* LiveStudioWindow::buildLiveRoomPage(QWidget* parent) {
     auto* splitter = new QSplitter(Qt::Horizontal, page);
     splitter->setChildrenCollapsible(false);
 
-    auto* previewGroup = new QGroupBox("Link-Mic Video", splitter);
+    auto* previewGroup = new QGroupBox(QStringLiteral("连麦视频"), splitter);
     previewGroup->setMinimumWidth(640);
     auto* previewLayout = new QVBoxLayout(previewGroup);
     previewLayout->setContentsMargins(12, 18, 12, 12);
@@ -582,13 +605,13 @@ QWidget* LiveStudioWindow::buildLiveRoomPage(QWidget* parent) {
     };
 
     videoGrid->addWidget(buildVideoPanel("Local Anchor", &localPreviewWidget_, &localPreviewStatusLabel_), 0, 0);
-    videoGrid->addWidget(buildVideoPanel("Remote Guest", &remotePreviewWidget_, &remotePreviewStatusLabel_), 0, 1);
+    videoGrid->addWidget(buildVideoPanel(QStringLiteral("远端嘉宾"), &remotePreviewWidget_, &remotePreviewStatusLabel_), 0, 1);
     videoGrid->setColumnStretch(0, 1);
     videoGrid->setColumnStretch(1, 1);
     previewLayout->addLayout(videoGrid, 1);
 
-    clearLocalPreviewSurface("Local preview is idle.\nStart publishing to begin local capture and preview.");
-    clearRemotePreviewSurface("Remote preview is idle.\nConnect link-mic to render the guest.");
+    clearLocalPreviewSurface(QStringLiteral("本地预览空闲。\\n开始推流后将显示本地采集画面。"));
+    clearRemotePreviewSurface(QStringLiteral("远端预览空闲。\\n建立连麦后将显示嘉宾画面。"));
 
     auto* sidebarScrollArea = new QScrollArea(splitter);
     sidebarScrollArea->setWidgetResizable(true);
@@ -608,65 +631,65 @@ QWidget* LiveStudioWindow::buildLiveRoomPage(QWidget* parent) {
 }
 
 QGroupBox* LiveStudioWindow::buildBusinessConfigGroup(QWidget* parent) {
-    auto* group = new QGroupBox("Business Live Config", parent);
+    auto* group = new QGroupBox(QStringLiteral("房间配置"), parent);
     auto* layout = new QGridLayout(group);
     layout->setHorizontalSpacing(10);
     layout->setVerticalSpacing(10);
     layout->setColumnStretch(5, 1);
 
     apiBaseUrlEdit_ = new QLineEdit(group);
-    apiBaseUrlEdit_->setText("http://192.168.3.28:8080");
-    apiBaseUrlEdit_->setPlaceholderText("http://192.168.3.28:8080");
+    apiBaseUrlEdit_->setText(QStringLiteral("http://127.0.0.1:8080"));
+    apiBaseUrlEdit_->setPlaceholderText(QStringLiteral("http://127.0.0.1:8080"));
     apiBaseUrlEdit_->setMaximumWidth(360);
 
     usernameEdit_ = new QLineEdit(group);
-    usernameEdit_->setPlaceholderText("username");
+    usernameEdit_->setPlaceholderText(QStringLiteral("输入用户名"));
     usernameEdit_->setMaximumWidth(240);
 
     passwordEdit_ = new QLineEdit(group);
     passwordEdit_->setEchoMode(QLineEdit::Password);
-    passwordEdit_->setPlaceholderText("password");
+    passwordEdit_->setPlaceholderText(QStringLiteral("输入密码"));
     passwordEdit_->setMaximumWidth(240);
 
     businessRoomKeyEdit_ = new QLineEdit(group);
-    businessRoomKeyEdit_->setPlaceholderText("optional, server-generated if empty");
+    businessRoomKeyEdit_->setPlaceholderText(QStringLiteral("留空则自动生成"));
     businessRoomKeyEdit_->setMaximumWidth(300);
 
     businessTitleEdit_ = new QLineEdit(group);
-    businessTitleEdit_->setPlaceholderText("optional live title");
+    businessTitleEdit_->setPlaceholderText(QStringLiteral("直播标题（可选）"));
     businessTitleEdit_->setMaximumWidth(360);
 
     auto* hintLabel = new QLabel(
-        "Business Room Key is not an RTMP stream name and is not a legacy signaling room_id. It must come from the live_room business response.",
+        QStringLiteral("直播间 Key 并非 RTMP 流名，也非旧版 signaling room_id，它必须来自 live_room 业务接口返回。"),
         group);
     hintLabel->setWordWrap(true);
 
-    layout->addWidget(new QLabel("API Base URL", group), 0, 0);
+    layout->addWidget(new QLabel(QStringLiteral("API 地址"), group), 0, 0);
     layout->addWidget(apiBaseUrlEdit_, 0, 1);
-    layout->addWidget(new QLabel("Username", group), 0, 2);
+    layout->addWidget(new QLabel(QStringLiteral("用户名"), group), 0, 2);
     layout->addWidget(usernameEdit_, 0, 3);
 
-    layout->addWidget(new QLabel("Password", group), 1, 0);
+    layout->addWidget(new QLabel(QStringLiteral("密码"), group), 1, 0);
     layout->addWidget(passwordEdit_, 1, 1);
-    layout->addWidget(new QLabel("Business Room Key", group), 1, 2);
+    layout->addWidget(new QLabel(QStringLiteral("直播间 Key"), group), 1, 2);
     layout->addWidget(businessRoomKeyEdit_, 1, 3);
 
-    layout->addWidget(new QLabel("Title", group), 2, 0);
+    layout->addWidget(new QLabel(QStringLiteral("标题"), group), 2, 0);
     layout->addWidget(businessTitleEdit_, 2, 1, 1, 3);
     layout->addWidget(hintLabel, 3, 0, 1, 4);
     return group;
 }
 
 QGroupBox* LiveStudioWindow::buildPublishConfigGroup(QWidget* parent) {
-    auto* group = new QGroupBox("Live Publish Config", parent);
+    auto* group = new QGroupBox(QStringLiteral("推流配置"), parent);
     auto* layout = new QGridLayout(group);
     layout->setHorizontalSpacing(12);
     layout->setVerticalSpacing(10);
     layout->setColumnStretch(10, 1);
 
     rtmpUrlEdit_ = new QLineEdit(group);
-    rtmpUrlEdit_->setPlaceholderText("rtmp://192.168.3.28/live/livestream");
-    rtmpUrlEdit_->setText("rtmp://192.168.3.28/live/livestream");
+    rtmpUrlEdit_->setPlaceholderText(QStringLiteral("rtmp://127.0.0.1/live/livestream"));
+    rtmpUrlEdit_->setText(QStringLiteral("rtmp://127.0.0.1/live/livestream"));
     rtmpUrlEdit_->setMaximumWidth(480);
 
     videoDeviceCombo_ = new QComboBox(group);
@@ -680,38 +703,37 @@ QGroupBox* LiveStudioWindow::buildPublishConfigGroup(QWidget* parent) {
     sampleRateCombo_ = new QComboBox(group);
     sampleRateCombo_->setMaximumWidth(180);
 
-    startButton_ = new QPushButton("Start Publish", group);
+    startButton_ = new QPushButton(QStringLiteral("开始推流"), group);
     startButton_->setObjectName("primaryButton");
     startButton_->setMinimumWidth(132);
 
-    layout->addWidget(new QLabel("RTMP URL", group), 0, 0);
+    layout->addWidget(new QLabel(QStringLiteral("RTMP 地址"), group), 0, 0);
     layout->addWidget(rtmpUrlEdit_, 0, 1);
     layout->addWidget(startButton_, 0, 2);
 
-    layout->addWidget(new QLabel("Video Device", group), 1, 0);
+    layout->addWidget(new QLabel(QStringLiteral("视频设备"), group), 1, 0);
     layout->addWidget(videoDeviceCombo_, 1, 1);
-    layout->addWidget(new QLabel("Audio Device", group), 1, 2);
+    layout->addWidget(new QLabel(QStringLiteral("音频设备"), group), 1, 2);
     layout->addWidget(audioDeviceCombo_, 1, 3);
-    layout->addWidget(new QLabel("Resolution", group), 1, 4);
+    layout->addWidget(new QLabel(QStringLiteral("分辨率"), group), 1, 4);
     layout->addWidget(resolutionCombo_, 1, 5);
-    layout->addWidget(new QLabel("FPS", group), 1, 6);
+    layout->addWidget(new QLabel(QStringLiteral("帧率"), group), 1, 6);
     layout->addWidget(fpsCombo_, 1, 7);
-    layout->addWidget(new QLabel("Sample Rate", group), 1, 8);
+    layout->addWidget(new QLabel(QStringLiteral("采样率"), group), 1, 8);
     layout->addWidget(sampleRateCombo_, 1, 9);
 
     return group;
 }
 
 QGroupBox* LiveStudioWindow::buildSignalingConfigGroup(QWidget* parent) {
-    auto* group = new QGroupBox("Cross-Room Anchor LinkMic", parent);
+    auto* group = new QGroupBox(QStringLiteral("跨房连麦"), parent);
     auto* layout = new QGridLayout(group);
     layout->setHorizontalSpacing(10);
     layout->setVerticalSpacing(10);
     layout->setColumnStretch(0, 1);
 
     auto* hintLabel = new QLabel(
-        "Cross-room invites should be started after your anchor has entered the live room. "
-        "Use the live-room sidebar to enter the remote anchor's roomKey and userId, then send Invite from there.",
+        QStringLiteral("跨房邀请应在主播进入直播间后发起。在直播间侧边栏输入远端主播的房间 Key 和用户 ID，然后发送邀请。"),
         group);
     hintLabel->setWordWrap(true);
     layout->addWidget(hintLabel, 0, 0);
@@ -725,46 +747,46 @@ QWidget* LiveStudioWindow::buildLiveRoomSidebar(QWidget* parent) {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(14);
 
-    auto* roomInfoGroup = new QGroupBox("Room Info", sidebar);
+    auto* roomInfoGroup = new QGroupBox(QStringLiteral("房间信息"), sidebar);
     auto* roomInfoLayout = new QGridLayout(roomInfoGroup);
     roomInfoLayout->setHorizontalSpacing(10);
     roomInfoLayout->setVerticalSpacing(10);
     roomInfoLayout->setColumnStretch(1, 1);
     roomInfoLayout->setColumnStretch(3, 1);
 
-    roomInfoLayout->addWidget(new QLabel("Business Room Key", roomInfoGroup), 0, 0);
+    roomInfoLayout->addWidget(new QLabel(QStringLiteral("直播间 Key"), roomInfoGroup), 0, 0);
     liveRoomIdValueLabel_ = makeCardValueLabel(roomInfoGroup);
     roomInfoLayout->addWidget(liveRoomIdValueLabel_, 0, 1, 1, 3);
 
-    roomInfoLayout->addWidget(new QLabel("Status", roomInfoGroup), 1, 0);
-    liveRoomStatusValueLabel_ = makeCardValueLabel(roomInfoGroup, "Not logged in");
+    roomInfoLayout->addWidget(new QLabel(QStringLiteral("状态"), roomInfoGroup), 1, 0);
+    liveRoomStatusValueLabel_ = makeCardValueLabel(roomInfoGroup, QStringLiteral("未登录"));
     roomInfoLayout->addWidget(liveRoomStatusValueLabel_, 1, 1);
 
-    roomInfoLayout->addWidget(new QLabel("Online Count", roomInfoGroup), 1, 2);
+    roomInfoLayout->addWidget(new QLabel(QStringLiteral("在线人数"), roomInfoGroup), 1, 2);
     liveRoomOnlineCountValueLabel_ = makeCardValueLabel(roomInfoGroup, "0");
     roomInfoLayout->addWidget(liveRoomOnlineCountValueLabel_, 1, 3);
 
-    roomInfoLayout->addWidget(new QLabel("Publish Duration", roomInfoGroup), 2, 0);
+    roomInfoLayout->addWidget(new QLabel(QStringLiteral("推流时长"), roomInfoGroup), 2, 0);
     liveRoomDurationValueLabel_ = makeCardValueLabel(roomInfoGroup);
     roomInfoLayout->addWidget(liveRoomDurationValueLabel_, 2, 1);
 
-    roomInfoLayout->addWidget(new QLabel("Current User", roomInfoGroup), 2, 2);
+    roomInfoLayout->addWidget(new QLabel(QStringLiteral("当前用户"), roomInfoGroup), 2, 2);
     liveRoomOwnerValueLabel_ = makeCardValueLabel(roomInfoGroup);
     roomInfoLayout->addWidget(liveRoomOwnerValueLabel_, 2, 3);
 
-    roomInfoLayout->addWidget(new QLabel("Business WS", roomInfoGroup), 3, 0);
+    roomInfoLayout->addWidget(new QLabel(QStringLiteral("业务 WS"), roomInfoGroup), 3, 0);
     businessWsStateValueLabel_ = makeCardValueLabel(roomInfoGroup);
     roomInfoLayout->addWidget(businessWsStateValueLabel_, 3, 1);
 
-    roomInfoLayout->addWidget(new QLabel("Signaling URL", roomInfoGroup), 3, 2);
+    roomInfoLayout->addWidget(new QLabel(QStringLiteral("信令地址"), roomInfoGroup), 3, 2);
     businessSignalingValueLabel_ = makeCardValueLabel(roomInfoGroup);
     roomInfoLayout->addWidget(businessSignalingValueLabel_, 3, 3);
 
-    roomInfoLayout->addWidget(new QLabel("Last Issue", roomInfoGroup), 4, 0);
+    roomInfoLayout->addWidget(new QLabel(QStringLiteral("最近异常"), roomInfoGroup), 4, 0);
     businessIssueValueLabel_ = makeCardValueLabel(roomInfoGroup, "none");
     roomInfoLayout->addWidget(businessIssueValueLabel_, 4, 1, 1, 3);
 
-    auto* linkMicGroup = new QGroupBox("Cross-Room Anchor LinkMic", sidebar);
+    auto* linkMicGroup = new QGroupBox(QStringLiteral("跨房连麦"), sidebar);
     auto* linkMicLayout = new QGridLayout(linkMicGroup);
     linkMicLayout->setHorizontalSpacing(10);
     linkMicLayout->setVerticalSpacing(10);
@@ -772,27 +794,26 @@ QWidget* LiveStudioWindow::buildLiveRoomSidebar(QWidget* parent) {
     linkMicLayout->setColumnStretch(3, 1);
 
     linkMicTargetRoomKeyEdit_ = new QLineEdit(linkMicGroup);
-    linkMicTargetRoomKeyEdit_->setPlaceholderText("target anchor roomKey");
+    linkMicTargetRoomKeyEdit_->setPlaceholderText(QStringLiteral("目标主播房间 Key"));
     linkMicTargetRoomKeyEdit_->setClearButtonEnabled(true);
     linkMicTargetRoomKeyEdit_->setFocusPolicy(Qt::StrongFocus);
     linkMicTargetRoomKeyEdit_->setMinimumWidth(220);
     linkMicTargetRoomKeyEdit_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
     linkMicTargetUserIdEdit_ = new QLineEdit(linkMicGroup);
-    linkMicTargetUserIdEdit_->setPlaceholderText("target anchor userId");
+    linkMicTargetUserIdEdit_->setPlaceholderText(QStringLiteral("目标主播用户 ID"));
     linkMicTargetUserIdEdit_->setClearButtonEnabled(true);
     linkMicTargetUserIdEdit_->setFocusPolicy(Qt::StrongFocus);
     linkMicTargetUserIdEdit_->setMinimumWidth(180);
     linkMicTargetUserIdEdit_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
-    linkMicLayout->addWidget(new QLabel("Target Room Key", linkMicGroup), 0, 0);
+    linkMicLayout->addWidget(new QLabel(QStringLiteral("目标房间 Key"), linkMicGroup), 0, 0);
     linkMicLayout->addWidget(linkMicTargetRoomKeyEdit_, 0, 1);
-    linkMicLayout->addWidget(new QLabel("Target User ID", linkMicGroup), 0, 2);
+    linkMicLayout->addWidget(new QLabel(QStringLiteral("目标用户 ID"), linkMicGroup), 0, 2);
     linkMicLayout->addWidget(linkMicTargetUserIdEdit_, 0, 3);
 
     auto* linkMicHintLabel = new QLabel(
-        "Enter the remote anchor's roomKey and userId here after you are live. "
-        "Invite and Hangup stay in this same cross-room session area.",
+        QStringLiteral("开播后在此输入远端主播的房间 Key 和用户 ID。邀请和挂断均在此跨房会话区域内操作。"),
         linkMicGroup);
     linkMicHintLabel->setWordWrap(true);
     linkMicLayout->addWidget(linkMicHintLabel, 1, 0, 1, 4);
@@ -805,13 +826,13 @@ QWidget* LiveStudioWindow::buildLiveRoomSidebar(QWidget* parent) {
     linkMicActionLayout->setColumnStretch(2, 1);
     linkMicActionLayout->setColumnStretch(3, 1);
 
-    linkMicInviteButton_ = new QPushButton("Invite", linkMicGroup);
+    linkMicInviteButton_ = new QPushButton(QStringLiteral("邀请"), linkMicGroup);
     linkMicInviteButton_->setObjectName("primaryButton");
-    linkMicAcceptButton_ = new QPushButton("Accept", linkMicGroup);
+    linkMicAcceptButton_ = new QPushButton(QStringLiteral("接受"), linkMicGroup);
     linkMicAcceptButton_->setObjectName("primaryButton");
-    linkMicRejectButton_ = new QPushButton("Reject", linkMicGroup);
+    linkMicRejectButton_ = new QPushButton(QStringLiteral("拒绝"), linkMicGroup);
     linkMicRejectButton_->setObjectName("secondaryButton");
-    linkMicHangupButton_ = new QPushButton("Hangup", linkMicGroup);
+    linkMicHangupButton_ = new QPushButton(QStringLiteral("挂断"), linkMicGroup);
     linkMicHangupButton_->setObjectName("dangerButton");
 
     const std::array<QPushButton*, 4> linkMicButtons = {
@@ -831,68 +852,68 @@ QWidget* LiveStudioWindow::buildLiveRoomSidebar(QWidget* parent) {
     linkMicActionLayout->addWidget(linkMicHangupButton_, 0, 3);
     linkMicLayout->addLayout(linkMicActionLayout, 2, 0, 1, 4);
 
-    auto* stateGroup = new QGroupBox("Stage1 State", sidebar);
+    auto* stateGroup = new QGroupBox(QStringLiteral("连麦状态"), sidebar);
     auto* stateLayout = new QGridLayout(stateGroup);
     stateLayout->setHorizontalSpacing(10);
     stateLayout->setVerticalSpacing(10);
     stateLayout->setColumnStretch(1, 1);
     stateLayout->setColumnStretch(3, 1);
 
-    stateLayout->addWidget(new QLabel("Transport", stateGroup), 0, 0);
+    stateLayout->addWidget(new QLabel(QStringLiteral("传输方式"), stateGroup), 0, 0);
     linkMicTransportValueLabel_ = makeCardValueLabel(stateGroup);
     stateLayout->addWidget(linkMicTransportValueLabel_, 0, 1);
-    stateLayout->addWidget(new QLabel("Signal State", stateGroup), 0, 2);
+    stateLayout->addWidget(new QLabel(QStringLiteral("信令状态"), stateGroup), 0, 2);
     linkMicStateValueLabel_ = makeCardValueLabel(stateGroup);
     stateLayout->addWidget(linkMicStateValueLabel_, 0, 3);
-    stateLayout->addWidget(new QLabel("Session ID", stateGroup), 1, 0);
+    stateLayout->addWidget(new QLabel(QStringLiteral("会话 ID"), stateGroup), 1, 0);
     linkMicSessionValueLabel_ = makeCardValueLabel(stateGroup);
     stateLayout->addWidget(linkMicSessionValueLabel_, 1, 1);
-    stateLayout->addWidget(new QLabel("Request ID", stateGroup), 1, 2);
+    stateLayout->addWidget(new QLabel(QStringLiteral("请求 ID"), stateGroup), 1, 2);
     linkMicRequestValueLabel_ = makeCardValueLabel(stateGroup);
     stateLayout->addWidget(linkMicRequestValueLabel_, 1, 3);
-    stateLayout->addWidget(new QLabel("Business Role", stateGroup), 2, 0);
+    stateLayout->addWidget(new QLabel(QStringLiteral("业务角色"), stateGroup), 2, 0);
     linkMicBusinessRoleValueLabel_ = makeCardValueLabel(stateGroup);
     stateLayout->addWidget(linkMicBusinessRoleValueLabel_, 2, 1);
-    stateLayout->addWidget(new QLabel("RTC Role", stateGroup), 2, 2);
+    stateLayout->addWidget(new QLabel(QStringLiteral("RTC 角色"), stateGroup), 2, 2);
     linkMicRtcRoleValueLabel_ = makeCardValueLabel(stateGroup);
     stateLayout->addWidget(linkMicRtcRoleValueLabel_, 2, 3);
-    stateLayout->addWidget(new QLabel("Remote Anchor", stateGroup), 3, 0);
+    stateLayout->addWidget(new QLabel(QStringLiteral("远端主播"), stateGroup), 3, 0);
     linkMicRemoteValueLabel_ = makeCardValueLabel(stateGroup);
     stateLayout->addWidget(linkMicRemoteValueLabel_, 3, 1, 1, 3);
-    stateLayout->addWidget(new QLabel("Current Room Members", stateGroup), 4, 0);
+    stateLayout->addWidget(new QLabel(QStringLiteral("当前房间成员"), stateGroup), 4, 0);
     linkMicOnlineValueLabel_ = makeCardValueLabel(stateGroup);
     stateLayout->addWidget(linkMicOnlineValueLabel_, 4, 1);
-    stateLayout->addWidget(new QLabel("RTC Count", stateGroup), 4, 2);
+    stateLayout->addWidget(new QLabel(QStringLiteral("RTC 连接数"), stateGroup), 4, 2);
     linkMicRtcCountValueLabel_ = makeCardValueLabel(stateGroup);
     stateLayout->addWidget(linkMicRtcCountValueLabel_, 4, 3);
-    stateLayout->addWidget(new QLabel("Join Params", stateGroup), 5, 0);
+    stateLayout->addWidget(new QLabel(QStringLiteral("入会参数"), stateGroup), 5, 0);
     linkMicJoinParamsValueLabel_ = makeCardValueLabel(stateGroup);
     stateLayout->addWidget(linkMicJoinParamsValueLabel_, 5, 1, 1, 3);
-    stateLayout->addWidget(new QLabel("RTC Peer", stateGroup), 6, 0);
+    stateLayout->addWidget(new QLabel(QStringLiteral("RTC 对端"), stateGroup), 6, 0);
     rtcPeerStateValueLabel_ = makeCardValueLabel(stateGroup);
     stateLayout->addWidget(rtcPeerStateValueLabel_, 6, 1);
-    stateLayout->addWidget(new QLabel("DataChannel", stateGroup), 6, 2);
+    stateLayout->addWidget(new QLabel(QStringLiteral("数据通道"), stateGroup), 6, 2);
     rtcDataChannelValueLabel_ = makeCardValueLabel(stateGroup);
     stateLayout->addWidget(rtcDataChannelValueLabel_, 6, 3);
-    stateLayout->addWidget(new QLabel("Ping / Pong", stateGroup), 7, 0);
+    stateLayout->addWidget(new QLabel(QStringLiteral("网络延迟"), stateGroup), 7, 0);
     rtcPingValueLabel_ = makeCardValueLabel(stateGroup);
     stateLayout->addWidget(rtcPingValueLabel_, 7, 1, 1, 3);
-    stateLayout->addWidget(new QLabel("Last Error", stateGroup), 8, 0);
+    stateLayout->addWidget(new QLabel(QStringLiteral("最近错误"), stateGroup), 8, 0);
     linkMicErrorValueLabel_ = makeCardValueLabel(stateGroup);
     stateLayout->addWidget(linkMicErrorValueLabel_, 8, 1, 1, 3);
 
-    auto* viewersGroup = new QGroupBox("Live Room Audience", sidebar);
+    auto* viewersGroup = new QGroupBox(QStringLiteral("直播间观众"), sidebar);
     auto* viewersLayout = new QGridLayout(viewersGroup);
     viewersLayout->setHorizontalSpacing(10);
     viewersLayout->setVerticalSpacing(10);
     viewersLayout->setColumnStretch(1, 1);
 
-    viewersLayout->addWidget(new QLabel("Audience Count", viewersGroup), 0, 0);
+    viewersLayout->addWidget(new QLabel(QStringLiteral("观众人数"), viewersGroup), 0, 0);
     viewerOnlineCountValueLabel_ = makeCardValueLabel(viewersGroup, "0");
     viewersLayout->addWidget(viewerOnlineCountValueLabel_, 0, 1);
 
     audienceMemberTable_ = new QTableWidget(0, 4, viewersGroup);
-    audienceMemberTable_->setHorizontalHeaderLabels({"User ID", "Username", "Role", "Status"});
+    audienceMemberTable_->setHorizontalHeaderLabels({QStringLiteral("用户 ID"), QStringLiteral("用户名"), QStringLiteral("角色"), QStringLiteral("状态")});
     audienceMemberTable_->horizontalHeader()->setStretchLastSection(true);
     audienceMemberTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     audienceMemberTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
@@ -906,13 +927,13 @@ QWidget* LiveStudioWindow::buildLiveRoomSidebar(QWidget* parent) {
     audienceMemberTable_->setMinimumHeight(180);
     viewersLayout->addWidget(audienceMemberTable_, 1, 0, 1, 2);
 
-    auto* membersGroup = new QGroupBox("RTC LinkMic Members", sidebar);
+    auto* membersGroup = new QGroupBox(QStringLiteral("RTC 连麦成员"), sidebar);
     auto* membersLayout = new QVBoxLayout(membersGroup);
     membersLayout->setContentsMargins(10, 18, 10, 10);
     membersLayout->setSpacing(10);
 
     linkMicMemberTable_ = new QTableWidget(0, 4, membersGroup);
-    linkMicMemberTable_->setHorizontalHeaderLabels({"User ID", "Display", "Role", "Status"});
+    linkMicMemberTable_->setHorizontalHeaderLabels({QStringLiteral("用户 ID"), QStringLiteral("显示名"), QStringLiteral("角色"), QStringLiteral("状态")});
     linkMicMemberTable_->horizontalHeader()->setStretchLastSection(true);
     linkMicMemberTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     linkMicMemberTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
@@ -925,7 +946,7 @@ QWidget* LiveStudioWindow::buildLiveRoomSidebar(QWidget* parent) {
     linkMicMemberTable_->setMinimumHeight(150);
     membersLayout->addWidget(linkMicMemberTable_);
 
-    auto* eventGroup = new QGroupBox("Event Log", sidebar);
+    auto* eventGroup = new QGroupBox(QStringLiteral("事件日志"), sidebar);
     auto* eventLayout = new QVBoxLayout(eventGroup);
     eventLayout->setContentsMargins(10, 18, 10, 10);
 
@@ -936,7 +957,7 @@ QWidget* LiveStudioWindow::buildLiveRoomSidebar(QWidget* parent) {
     linkMicEventLogEdit_->setFont(monoFont);
     eventLayout->addWidget(linkMicEventLogEdit_);
 
-    stopButton_ = new QPushButton("Stop Publish", sidebar);
+    stopButton_ = new QPushButton(QStringLiteral("停止推流"), sidebar);
     stopButton_->setObjectName("dangerButton");
     stopButton_->setMinimumWidth(132);
 
@@ -965,7 +986,7 @@ void LiveStudioWindow::buildStatusBar() {
 }
 
 void LiveStudioWindow::beginDeviceProbe() {
-    statusBar()->showMessage("Probing live devices...", 3000);
+    statusBar()->showMessage(QStringLiteral("正在检测直播设备..."), 3000);
     startOperation([]() {
         OperationResult result;
         result.kind = OperationKind::probe_devices;
@@ -1016,14 +1037,14 @@ void LiveStudioWindow::handleProbeResult(const OperationResult& result) {
     if (!result.status.ok() || !result.probe.has_value()) {
         deviceProbeReady_ = false;
         setPanelState(PanelState::failed);
-        showErrorPrompt(QString("Device probe failed: %1").arg(QString::fromStdString(result.status.message)));
+        showErrorPrompt(QString(QStringLiteral("设备检测失败: %1")).arg(QString::fromStdString(result.status.message)));
         return;
     }
 
     deviceProbeReady_ = true;
     populateCaptureControls(*result.probe);
     setPanelState(PanelState::idle);
-    showInfoPrompt(QString("Device probe ready: %1 camera(s), %2 microphone(s).")
+    showInfoPrompt(QString(QStringLiteral("设备检测完成: %1 个摄像头, %2 个麦克风。"))
                        .arg(result.probe->availableVideoDeviceNames.size())
                        .arg(result.probe->availableAudioDeviceNames.size()));
 }
@@ -1037,7 +1058,7 @@ void LiveStudioWindow::handleStartPublishResult(const OperationResult& result) {
             businessClient_->beginStopSequence();
         }
         setPanelState(PanelState::failed);
-        showErrorPrompt(QString("Start publish failed: %1").arg(QString::fromStdString(result.status.message)));
+        showErrorPrompt(QString(QStringLiteral("推流启动失败: %1")).arg(QString::fromStdString(result.status.message)));
         return;
     }
 
@@ -1046,14 +1067,14 @@ void LiveStudioWindow::handleStartPublishResult(const OperationResult& result) {
         businessClient_->setPublishingActive(true);
     }
     setPanelState(PanelState::publishing);
-    showInfoPrompt("Business ready and RTMP publishing is live.", true);
+    showInfoPrompt(QStringLiteral("业务就绪，RTMP 推流已开始。"), true);
     switchToLiveRoomPage();
 }
 
 void LiveStudioWindow::handleStopPublishResult(const OperationResult& result) {
     if (!result.status.ok()) {
         setPanelState(PanelState::failed);
-        showErrorPrompt(QString("Stop publish failed: %1").arg(QString::fromStdString(result.status.message)));
+        showErrorPrompt(QString(QStringLiteral("停止推流失败: %1")).arg(QString::fromStdString(result.status.message)));
         return;
     }
 
@@ -1064,7 +1085,7 @@ void LiveStudioWindow::handleStopPublishResult(const OperationResult& result) {
         businessClient_->beginStopSequence();
     }
     setPanelState(PanelState::idle);
-    showInfoPrompt("Publish stopped. Business room cleanup continues in the background.");
+    showInfoPrompt(QStringLiteral("推流已停止，后台正在清理直播间。"));
     switchToSetupPage();
 }
 
@@ -1117,7 +1138,7 @@ void LiveStudioWindow::handleBusinessStateChanged() {
 
     if (previousState == live_studio::business::BusinessLiveState::reconnecting &&
         businessSnapshot_.state == live_studio::business::BusinessLiveState::anchor_online && diagnostics.publishing) {
-        showInfoPrompt("Business presence recovered.", false);
+        showInfoPrompt(QStringLiteral("业务状态已恢复。"), false);
     }
 
     refreshBusinessStatus();
@@ -1139,16 +1160,16 @@ void LiveStudioWindow::handleBusinessReadyToPublish() {
             businessClient_->setPublishingActive(true);
         }
         setPanelState(PanelState::publishing);
-        clearLocalPreviewSurface("Local preview is unavailable.\nRTC-only mode is active because no camera is selected.");
-        statusBar()->showMessage("Business ready. RTC-only mode is active.", 3000);
-        showInfoPrompt("Business ready. RTC-only mode is active without local capture or RTMP publish.", true);
+        clearLocalPreviewSurface(QStringLiteral("本地预览不可用。\\nRTC 模式已激活（未选择摄像头）。"));
+        statusBar()->showMessage(QStringLiteral("业务就绪，RTC 模式已激活。"), 3000);
+        showInfoPrompt(QStringLiteral("业务就绪，RTC 模式已激活（无本地采集/RTMP 推流）。"), true);
         switchToLiveRoomPage();
         return;
     }
 
     rtcOnlyPublishingActive_ = false;
     setPanelState(PanelState::starting);
-    statusBar()->showMessage("Business ready. Starting local capture and RTMP publish...", 3000);
+    statusBar()->showMessage(QStringLiteral("业务就绪，正在启动本地采集和 RTMP 推流..."), 3000);
     startOperation([this]() {
         OperationResult result;
         result.kind = OperationKind::start_publish;
@@ -1325,7 +1346,7 @@ void LiveStudioWindow::syncLinkMicTransportFromBusiness() {
         if (linkMicSession_.usesExternalTransport()) {
             linkMicSession_.disconnectFromRoom();
         }
-        stopRtcSession("business identity unavailable");
+        stopRtcSession(QStringLiteral("业务身份不可用"));
         return;
     }
 
@@ -1445,7 +1466,7 @@ void LiveStudioWindow::ensureRtcSessionForJoinParams() {
     if (!bridgeStarted || !rtcPeerSession_.start(config)) {
         configureRtcCaptureTap(false);
         stopRtcSession("failed to start libdatachannel peer session");
-        showErrorPrompt("Failed to start the cross-room libdatachannel session.");
+        showErrorPrompt(QStringLiteral("跨房连麦会话启动失败。"));
         return;
     }
 
@@ -1457,7 +1478,7 @@ void LiveStudioWindow::stopRtcSession(const QString& reason) {
     configureRtcCaptureTap(false);
     rtcSignalingBridge_.stop();
     rtcPeerSession_.stop(reason);
-    clearRemotePreviewSurface("Remote preview is idle.\nConnect link-mic to render the guest.");
+    clearRemotePreviewSurface(QStringLiteral("远端预览空闲。\\n建立连麦后将显示嘉宾画面。"));
 }
 
 void LiveStudioWindow::configureRtcCaptureTap(bool enableSharedCapture) {
@@ -1511,7 +1532,7 @@ void LiveStudioWindow::refreshPanel() {
     const bool publishingActive = isPublishingSessionActive(diagnostics);
     const QString currentError = QString::fromStdString(diagnostics.lastError);
     if (!currentError.isEmpty() && currentError != lastErrorText_) {
-        showErrorPrompt(QString("Session error: %1").arg(currentError));
+        showErrorPrompt(QString(QStringLiteral("会话错误: %1")).arg(currentError));
     }
     lastErrorText_ = currentError;
 
@@ -1697,9 +1718,9 @@ void LiveStudioWindow::populateCaptureControls(const live_studio::capture::LiveD
     const QSignalBlocker blockSampleRate(sampleRateCombo_);
 
     videoDeviceCombo_->clear();
-    videoDeviceCombo_->addItem("none", "");
+    videoDeviceCombo_->addItem(QStringLiteral("无"), "");
     if (!probe.availableVideoDeviceNames.empty()) {
-        videoDeviceCombo_->addItem("default", "default");
+        videoDeviceCombo_->addItem(QStringLiteral("默认"), QStringLiteral("default"));
     }
     for (const std::string& deviceName : probe.availableVideoDeviceNames) {
         const QString name = QString::fromStdString(deviceName);
@@ -1712,8 +1733,8 @@ void LiveStudioWindow::populateCaptureControls(const live_studio::capture::LiveD
     }
 
     audioDeviceCombo_->clear();
-    audioDeviceCombo_->addItem("none", "");
-    audioDeviceCombo_->addItem("default", "default");
+    audioDeviceCombo_->addItem(QStringLiteral("无"), "");
+    audioDeviceCombo_->addItem(QStringLiteral("默认"), QStringLiteral("default"));
     for (const std::string& deviceName : probe.availableAudioDeviceNames) {
         const QString name = QString::fromStdString(deviceName);
         audioDeviceCombo_->addItem(name, name);
@@ -1741,7 +1762,7 @@ void LiveStudioWindow::populateCaptureControls(const live_studio::capture::LiveD
     fpsCombo_->clear();
     const std::array<int, 4> fpsOptions = {15, 24, 30, 60};
     for (int fps : fpsOptions) {
-        fpsCombo_->addItem(QString("%1 fps").arg(fps), fps);
+        fpsCombo_->addItem(QString(QStringLiteral("%1 帧/秒")).arg(fps), fps);
     }
     ensureIntOption(fpsCombo_, probe.negotiatedVideoFps, " fps");
     selectComboData(fpsCombo_, probe.negotiatedVideoFps > 0 ? QVariant(probe.negotiatedVideoFps) : QVariant(30));
@@ -1898,7 +1919,7 @@ void LiveStudioWindow::populateLinkMicMemberTable() {
         return;
     }
 
-    auto* localUserIdItem = new QTableWidgetItem(linkMicSession_.config().userId + " (you)");
+    auto* localUserIdItem = new QTableWidgetItem(linkMicSession_.config().userId + QStringLiteral(" (你)"));
     auto* localDisplayItem = new QTableWidgetItem(fallbackText(linkMicSession_.config().displayName, linkMicSession_.config().userId));
     auto* localRoleItem = new QTableWidgetItem(fallbackText(roomState.businessRole(), "local-anchor"));
     auto* localStatusItem = new QTableWidgetItem("local-room=" + fallbackText(linkMicSession_.config().roomKey));
@@ -2031,17 +2052,17 @@ live_studio::linkmic::CrossRoomInviteTarget LiveStudioWindow::buildInviteTarget(
 QString LiveStudioWindow::panelStateText(PanelState state) {
     switch (state) {
     case PanelState::idle:
-        return "idle";
+        return QStringLiteral("空闲");
     case PanelState::starting:
-        return "starting";
+        return QStringLiteral("启动中");
     case PanelState::publishing:
-        return "publishing";
+        return QStringLiteral("推流中");
     case PanelState::stopping:
-        return "stopping";
+        return QStringLiteral("停止中");
     case PanelState::failed:
-        return "failed";
+        return QStringLiteral("异常");
     }
-    return "idle";
+    return QStringLiteral("空闲");
 }
 
 QString LiveStudioWindow::liveRoomStatusText(PanelState state, bool publishing) {
@@ -2051,16 +2072,16 @@ QString LiveStudioWindow::liveRoomStatusText(PanelState state, bool publishing) 
 
     switch (state) {
     case PanelState::idle:
-        return "idle";
+        return QStringLiteral("空闲");
     case PanelState::starting:
-        return "starting";
+        return QStringLiteral("启动中");
     case PanelState::publishing:
         return "live";
     case PanelState::stopping:
     case PanelState::failed:
         return "ended";
     }
-    return "idle";
+    return QStringLiteral("空闲");
 }
 
 QString LiveStudioWindow::businessDisplayStateText(
@@ -2068,10 +2089,10 @@ QString LiveStudioWindow::businessDisplayStateText(
     const live_studio::session::SessionDiagnostics& diagnostics,
     PanelState panelState) {
     if (panelState == PanelState::stopping || snapshot.state == live_studio::business::BusinessLiveState::stopping) {
-        return "Stopping";
+        return QStringLiteral("停止中");
     }
     if (diagnostics.publishing || panelState == PanelState::publishing) {
-        return "Publishing";
+        return QStringLiteral("推流中");
     }
     if (snapshot.state == live_studio::business::BusinessLiveState::error || panelState == PanelState::failed) {
         return "Error";
@@ -2100,7 +2121,7 @@ QString LiveStudioWindow::businessDisplayStateText(
     if (!snapshot.accessToken.trimmed().isEmpty() && snapshot.userId > 0) {
         return "Logged in";
     }
-    return "Not logged in";
+    return QStringLiteral("未登录");
 }
 QString LiveStudioWindow::formatDuration(qint64 elapsedMs) {
     if (elapsedMs < 0) {
