@@ -42,6 +42,17 @@ struct LiveDeviceCaptureConfig {
     int frameCount = 0;
 };
 
+struct DesktopCaptureConfig {
+    std::string sourceKind = "desktop";
+    std::string sourceLabel = "desktop-source";
+    int monitorIndex = 0;
+    int offsetX = 0;
+    int offsetY = 0;
+    int width = 1920;
+    int height = 1080;
+    int fps = 30;
+    int frameCount = 0;
+};
 struct VideoFrame {
     std::string sourceKind = "unconfigured";
     std::string sourceLabel = "unconfigured-source";

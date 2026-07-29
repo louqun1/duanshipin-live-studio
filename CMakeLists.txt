@@ -123,6 +123,7 @@ live_studio_import_shared_library(
 message(STATUS "duanshipin-live-studio FFmpeg root: ${LIVE_STUDIO_FFMPEG_ROOT}")
 
 add_library(live_studio_core
+    src/capture/DesktopCaptureSource.cpp
     src/capture/LiveDeviceCaptureSource.cpp
     src/common/WavFileWriter.cpp
     src/decode/OpusAudioDecoder.cpp
@@ -150,12 +151,15 @@ target_link_libraries(live_studio_core
         FFmpeg::avutil
         FFmpeg::swresample
         FFmpeg::swscale
+        FFmpeg::avdevice
+        FFmpeg::avformat
 )
 
 if(WIN32)
     target_link_libraries(live_studio_core
         PUBLIC
             avrt
+            gdi32
             ksuser
             mf
             mfplat

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <algorithm>
 #include <atomic>
@@ -407,6 +407,7 @@ struct LiveSessionController::ControllerState {
     AudioLevelSnapshot latestAudioLevel;
     SessionDiagnostics diagnostics;
     capture::LiveDeviceCaptureSource captureSource;
+    capture::DesktopCaptureSource desktopSource;
     LiveSessionController::MediaTapCallbacks mediaTapCallbacks;
     std::thread workerThread;
     bool workerStopRequested = false;

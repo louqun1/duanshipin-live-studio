@@ -1,4 +1,4 @@
-#include "session/LiveSessionControllerInternal.hpp"
+﻿#include "session/LiveSessionControllerInternal.hpp"
 
 namespace live_studio::session {
 
@@ -9,33 +9,50 @@ LiveSessionController::~LiveSessionController() {
 }
 
 Status LiveSessionController::open(const LiveSessionConfig& config) {
-    if (config.capture.videoDeviceId.empty()) {
-        return Status::InvalidArgument("open requires capture.videoDeviceId");
+    if (config.captureMode == "desktop") {
+        if (config.capture.width <= 0 || config.capture.height <= 0 || config.capture.fps <= 0) {
+            return Status::InvalidArgument("desktop capture requires width, height, and fps");
+        }
+    } else {
+        if (config.capture.videoDeviceId.empty()) {
+            return Status::InvalidArgument("open requires capture.videoDeviceId");
+        }
     }
 
     close();
 
+    bool isDesktop = (config.captureMode == "desktop");
     capture::LiveDeviceProbeResult probe;
-    Status status = capture::probeLiveDeviceCaptureConfig(config.capture, &probe);
-    if (!status.ok()) {
-        return status;
+    Status status = Status::Ok();
+    if (!isDesktop) {
+        status = capture::probeLiveDeviceCaptureConfig(config.capture, &probe);
+        if (!status.ok()) {
+            return status;
+        }
     }
 
     std::lock_guard<std::mutex> lock(state_->mutex);
     state_->config = config;
-    state_->config.capture.width = probe.negotiatedVideoWidth > 0 ? probe.negotiatedVideoWidth : config.capture.width;
-    state_->config.capture.height =
-        probe.negotiatedVideoHeight > 0 ? probe.negotiatedVideoHeight : config.capture.height;
-    state_->config.capture.fps = probe.negotiatedVideoFps > 0 ? probe.negotiatedVideoFps : config.capture.fps;
-    state_->config.capture.resolvedVideoDeviceName = probe.selectedVideoDeviceName;
-    if (!config.capture.audioDeviceId.empty()) {
-        state_->config.capture.sampleRate =
-            probe.negotiatedSampleRate > 0 ? probe.negotiatedSampleRate : config.capture.sampleRate;
-        state_->config.capture.channels =
-            probe.negotiatedChannels > 0 ? probe.negotiatedChannels : config.capture.channels;
-        state_->config.capture.resolvedAudioDeviceName = probe.selectedAudioDeviceName;
-    } else {
+    if (isDesktop) {
+        state_->config.capture.videoDeviceId.clear();
+        state_->config.capture.audioDeviceId.clear();
+        state_->config.capture.resolvedVideoDeviceName = "Desktop Screen";
         state_->config.capture.resolvedAudioDeviceName.clear();
+    } else {
+        state_->config.capture.width = probe.negotiatedVideoWidth > 0 ? probe.negotiatedVideoWidth : config.capture.width;
+        state_->config.capture.height =
+            probe.negotiatedVideoHeight > 0 ? probe.negotiatedVideoHeight : config.capture.height;
+        state_->config.capture.fps = probe.negotiatedVideoFps > 0 ? probe.negotiatedVideoFps : config.capture.fps;
+        state_->config.capture.resolvedVideoDeviceName = probe.selectedVideoDeviceName;
+        if (!config.capture.audioDeviceId.empty()) {
+            state_->config.capture.sampleRate =
+                probe.negotiatedSampleRate > 0 ? probe.negotiatedSampleRate : config.capture.sampleRate;
+            state_->config.capture.channels =
+                probe.negotiatedChannels > 0 ? probe.negotiatedChannels : config.capture.channels;
+            state_->config.capture.resolvedAudioDeviceName = probe.selectedAudioDeviceName;
+        } else {
+            state_->config.capture.resolvedAudioDeviceName.clear();
+        }
     }
 
     state_->latestPreviewFrame = PreviewFrameSnapshot{};
@@ -43,14 +60,15 @@ Status LiveSessionController::open(const LiveSessionConfig& config) {
     state_->lastPreviewFrameStoredNs = 0;
     state_->diagnostics = SessionDiagnostics{};
     state_->diagnostics.opened = true;
-    state_->diagnostics.audioEnabled = !config.capture.audioDeviceId.empty();
-    state_->diagnostics.selectedVideoDeviceName = probe.selectedVideoDeviceName;
-    state_->diagnostics.selectedAudioDeviceName = probe.selectedAudioDeviceName;
+    state_->diagnostics.audioEnabled = isDesktop ? false : !config.capture.audioDeviceId.empty();
+    state_->diagnostics.selectedVideoDeviceName = isDesktop ? "Desktop Screen" : probe.selectedVideoDeviceName;
+    state_->diagnostics.selectedAudioDeviceName = isDesktop ? "" : probe.selectedAudioDeviceName;
     state_->diagnostics.probe = std::move(probe);
 
     pushTrace(state_->trace,
               "session",
-              "opened: video=\"" + state_->diagnostics.selectedVideoDeviceName + "\" audio=\"" +
+              "opened: captureMode=" + (isDesktop ? std::string("desktop") : std::string("device")) +
+                  " video=\"" + state_->diagnostics.selectedVideoDeviceName + "\" audio=\"" +
                   state_->diagnostics.selectedAudioDeviceName + "\"");
     return Status::Ok();
 }
@@ -71,6 +89,7 @@ void LiveSessionController::close() noexcept {
 
     finalizePublishSession(std::move(publishSession));
     state_->captureSource.stop();
+    state_->desktopSource.stop();
     if (workerThread.joinable()) {
         workerThread.join();
     }

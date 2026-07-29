@@ -689,6 +689,12 @@ QGroupBox* LiveStudioWindow::buildPublishConfigGroup(QWidget* parent) {
     layout->setVerticalSpacing(10);
     layout->setColumnStretch(10, 1);
 
+    captureModeCombo_ = new QComboBox(group);
+    captureModeCombo_->setMaximumWidth(160);
+    captureModeCombo_->addItem(QStringLiteral("摄像头"), QStringLiteral("device"));
+    captureModeCombo_->addItem(QStringLiteral("桌面捕获"), QStringLiteral("desktop"));
+    captureModeCombo_->setCurrentIndex(0);
+
     rtmpUrlEdit_ = new QLineEdit(group);
     rtmpUrlEdit_->setPlaceholderText(QStringLiteral("rtmp://127.0.0.1/live/livestream"));
     rtmpUrlEdit_->setText(QStringLiteral("rtmp://127.0.0.1/live/livestream"));
@@ -1724,6 +1730,31 @@ void LiveStudioWindow::updateStatusSummary(const live_studio::session::SessionDi
     statusSummaryLabel_->setToolTip(QString::fromStdString(diagnostics.lastError));
 }
 
+void LiveStudioWindow::applyCaptureModeVisibility() {
+    if (captureModeCombo_ == nullptr) {
+        return;
+    }
+
+    const QString currentMode = captureModeCombo_->currentData().toString();
+    const bool isDesktop = (currentMode == QStringLiteral("desktop"));
+
+    const bool deviceControlsVisible = !isDesktop;
+
+    if (videoDeviceCombo_ != nullptr) {
+        videoDeviceCombo_->setVisible(deviceControlsVisible);
+    }
+    if (audioDeviceCombo_ != nullptr) {
+        audioDeviceCombo_->setVisible(deviceControlsVisible);
+    }
+    if (sampleRateCombo_ != nullptr) {
+        sampleRateCombo_->setVisible(deviceControlsVisible);
+    }
+
+    if (resolutionCombo_ != nullptr) {
+        resolutionCombo_->setVisible(deviceControlsVisible);
+    }
+}
+
 void LiveStudioWindow::populateCaptureControls(const live_studio::capture::LiveDeviceProbeResult& probe) {
     const QSignalBlocker blockVideo(videoDeviceCombo_);
     const QSignalBlocker blockAudio(audioDeviceCombo_);
@@ -2026,6 +2057,10 @@ live_studio::business::BusinessStartConfig LiveStudioWindow::buildBusinessStartC
 
 live_studio::session::LiveSessionConfig LiveStudioWindow::buildSessionConfig() const {
     live_studio::session::LiveSessionConfig config;
+    const QString captureMode = captureModeCombo_ != nullptr
+        ? captureModeCombo_->currentData().toString()
+        : QStringLiteral("device");
+    config.captureMode = toUtf8String(captureMode);
     const QSize resolution = resolutionCombo_->currentData().toSize();
     const int fps = fpsCombo_->currentData().toInt();
     const int sampleRate = sampleRateCombo_->currentData().toInt();
@@ -2035,12 +2070,13 @@ live_studio::session::LiveSessionConfig LiveStudioWindow::buildSessionConfig() c
     config.capture.sourceLabel = "live-studio-panel";
     config.capture.videoDeviceId = toUtf8String(videoDeviceCombo_->currentData().toString());
     config.capture.audioDeviceId = audioDeviceId;
-    config.capture.width = resolution.width();
-    config.capture.height = resolution.height();
+    const bool isDesktopCapture = (captureMode == QStringLiteral("desktop"));
+    config.capture.width = isDesktopCapture ? 1920 : resolution.width();
+    config.capture.height = isDesktopCapture ? 1080 : resolution.height();
     config.capture.fps = fps > 0 ? fps : 30;
     config.capture.sampleRate = sampleRate > 0 ? sampleRate : 48000;
     config.capture.channels = audioDeviceId.empty() ? 0 : 2;
-    config.capture.frameCount = 1;
+    config.capture.frameCount = isDesktopCapture ? 0 : 1;
     config.videoBitrate = chooseVideoBitrate(config.capture.width, config.capture.height, config.capture.fps);
     config.audioBitrate = audioDeviceId.empty() ? 0 : 128000;
     return config;

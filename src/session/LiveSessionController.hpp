@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 
+#include "capture/DesktopCaptureSource.hpp"
 #include "capture/LiveDeviceCaptureSource.hpp"
 #include "common/MediaTypes.hpp"
 #include "common/Status.hpp"
@@ -11,6 +12,7 @@
 namespace live_studio::session {
 
 struct LiveSessionConfig {
+    std::string captureMode = "device";
     media::LiveDeviceCaptureConfig capture;
     std::string rtmpUrl;
     int videoBitrate = 2000000;

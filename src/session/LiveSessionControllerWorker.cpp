@@ -9,6 +9,12 @@ void workerMain(LiveSessionController::ControllerState* state) {
 
     pushTrace(state->trace, "preview", "preview worker started");
 
+    bool isDesktopMode = false;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        isDesktopMode = (state->config.captureMode == "desktop");
+    }
+
     while (true) {
         {
             std::lock_guard<std::mutex> lock(state->mutex);
@@ -18,7 +24,9 @@ void workerMain(LiveSessionController::ControllerState* state) {
         }
 
         capture::CaptureEvent event;
-        const Status readStatus = state->captureSource.readNext(&event);
+        const Status readStatus = isDesktopMode
+            ? state->desktopSource.readNext(&event)
+            : state->captureSource.readNext(&event);
         if (!readStatus.ok()) {
             bool expectedStop = false;
             std::unique_ptr<PublishSession> publishSession;
@@ -40,7 +48,9 @@ void workerMain(LiveSessionController::ControllerState* state) {
             return;
         }
 
-        const int pendingEvents = state->captureSource.pendingEventCount();
+        const int pendingEvents = isDesktopMode
+            ? state->desktopSource.pendingEventCount()
+            : state->captureSource.pendingEventCount();
         if (event.kind == capture::CaptureEventKind::video) {
             LiveSessionController::MediaTapCallbacks mediaTapCallbacks;
             {
@@ -218,23 +228,51 @@ Status LiveSessionController::startPreview() {
         staleWorkerThread.join();
     }
 
-    Status status = state_->captureSource.configureDeviceSource(state_->config.capture);
-    if (!status.ok()) {
-        return status;
-    }
+    const bool isDesktopMode = (state_->config.captureMode == "desktop");
+    Status status = Status::Ok();
 
-    status = state_->captureSource.start();
+    if (isDesktopMode) {
+        media::DesktopCaptureConfig desktopConfig;
+        desktopConfig.sourceKind = "desktop";
+        desktopConfig.sourceLabel = "desktop-source";
+        desktopConfig.width = state_->config.capture.width;
+        desktopConfig.height = state_->config.capture.height;
+        desktopConfig.fps = state_->config.capture.fps;
+        desktopConfig.frameCount = state_->config.capture.frameCount;
+
+        status = state_->desktopSource.configure(desktopConfig);
+        if (!status.ok()) {
+            return status;
+        }
+        status = state_->desktopSource.start();
+    } else {
+        status = state_->captureSource.configureDeviceSource(state_->config.capture);
+        if (!status.ok()) {
+            return status;
+        }
+        status = state_->captureSource.start();
+    }
     if (!status.ok()) {
         return status;
     }
 
     {
         std::lock_guard<std::mutex> lock(state_->mutex);
-        state_->config.capture = state_->captureSource.config();
-        state_->diagnostics.previewRunning = true;
-        state_->diagnostics.audioEnabled = state_->captureSource.hasAudio();
-        state_->diagnostics.selectedVideoDeviceName = state_->captureSource.config().resolvedVideoDeviceName;
-        state_->diagnostics.selectedAudioDeviceName = state_->captureSource.config().resolvedAudioDeviceName;
+        if (isDesktopMode) {
+            state_->config.capture.width = state_->desktopSource.config().width;
+            state_->config.capture.height = state_->desktopSource.config().height;
+            state_->config.capture.resolvedVideoDeviceName = "Desktop Screen";
+            state_->diagnostics.previewRunning = true;
+            state_->diagnostics.audioEnabled = false;
+            state_->diagnostics.selectedVideoDeviceName = "Desktop Screen";
+            state_->diagnostics.selectedAudioDeviceName.clear();
+        } else {
+            state_->config.capture = state_->captureSource.config();
+            state_->diagnostics.previewRunning = true;
+            state_->diagnostics.audioEnabled = state_->captureSource.hasAudio();
+            state_->diagnostics.selectedVideoDeviceName = state_->captureSource.config().resolvedVideoDeviceName;
+            state_->diagnostics.selectedAudioDeviceName = state_->captureSource.config().resolvedAudioDeviceName;
+        }
         state_->workerStopRequested = false;
         state_->workerThreadRunning = true;
         state_->workerThread = std::thread(workerMain, state_.get());
@@ -242,8 +280,9 @@ Status LiveSessionController::startPreview() {
 
     pushTrace(state_->trace,
               "preview",
-              "started: video=\"" + state_->captureSource.config().resolvedVideoDeviceName + "\" audio=\"" +
-                  state_->captureSource.config().resolvedAudioDeviceName + "\"");
+              "started: captureMode=" + (isDesktopMode ? std::string("desktop") : std::string("device")) +
+                  " video=\"" + state_->diagnostics.selectedVideoDeviceName + "\" audio=\"" +
+                  state_->diagnostics.selectedAudioDeviceName + "\"");
     return Status::Ok();
 }
 

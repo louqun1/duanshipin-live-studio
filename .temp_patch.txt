@@ -1,0 +1,31 @@
+﻿*** Begin Patch
+*** Update File: src/common/MediaTypes.hpp
+@@ struct LiveDeviceCaptureConfig {
+     std::string sourceKind = "live-device";
+     std::string sourceLabel = "live-device-source";
+     std::string videoDeviceId;
+     std::string audioDeviceId;
+     std::string resolvedVideoDeviceName;
+     std::string resolvedAudioDeviceName;
+     int width = 0;
+     int height = 0;
+     int fps = 0;
+     int sampleRate = 0;
+     int channels = 0;
+     int frameCount = 0;
+ };
+@@
++struct DesktopCaptureConfig {
++    std::string sourceKind = "desktop";
++    std::string sourceLabel = "desktop-source";
++    int monitorIndex = 0;
++    int offsetX = 0;
++    int offsetY = 0;
++    int width = 1920;
++    int height = 1080;
++    int fps = 30;
++    int frameCount = 0;
++};
++
+ struct VideoFrame {
+*** End Patch

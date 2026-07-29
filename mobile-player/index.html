@@ -1,0 +1,223 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>直播拉流播放器</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden;background:#000;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  
+  #app{display:flex;flex-direction:column;height:100%;height:100dvh}
+  
+  /* 顶部工具栏 */
+  #toolbar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(0,0,0,.85);flex-shrink:0;z-index:10}
+  #urlInput{flex:1;height:36px;border:1px solid #444;border-radius:6px;padding:0 10px;font-size:14px;background:#1a1a1a;color:#eee;outline:none;min-width:0}
+  #urlInput:focus{border-color:#0af}
+  #connectBtn{height:36px;padding:0 16px;border:none;border-radius:6px;background:#0af;color:#fff;font-size:14px;font-weight:600;cursor:pointer;white-space:nowrap;flex-shrink:0}
+  #connectBtn:active{opacity:.8}
+  #connectBtn.connected{background:#f44}
+
+  /* 视频容器 */
+  #videoContainer{flex:1;display:flex;align-items:center;justify-content:center;position:relative;background:#000;min-height:0}
+  video{width:100%;height:100%;object-fit:contain;display:none}
+  video.active{display:block}
+
+  /* 状态提示 */
+  #status{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#888;font-size:15px;text-align:center;pointer-events:none}
+  #status .spinner{display:inline-block;width:24px;height:24px;border:2px solid #333;border-top-color:#0af;border-radius:50%;animation:spin .8s linear infinite;margin-bottom:10px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  #status.hidden{display:none}
+
+  /* 底部信息栏 */
+  #infoBar{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;background:rgba(0,0,0,.85);color:#aaa;font-size:12px;flex-shrink:0}
+  #infoBar .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+  #infoBar .dot.live{background:#0f0;animation:pulse 1.5s ease-in-out infinite}
+  #infoBar .dot.off{background:#f44}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+  /* 预设按钮 */
+  #presets{padding:6px 12px;background:rgba(0,0,0,.85);display:flex;gap:6px;flex-wrap:wrap;flex-shrink:0}
+  .preset-btn{height:28px;padding:0 10px;border:1px solid #444;border-radius:14px;background:transparent;color:#aaa;font-size:12px;cursor:pointer;white-space:nowrap}
+  .preset-btn:active{background:#222;color:#fff}
+
+  /* Toast */
+  #toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.85);color:#fff;padding:8px 20px;border-radius:20px;font-size:13px;z-index:100;opacity:0;transition:opacity .3s}
+  #toast.show{opacity:1}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <input id="urlInput" type="text" placeholder="输入 HLS 地址，如 http://ip:8080/live/stream.m3u8" autocomplete="off">
+    <button id="connectBtn" onclick="togglePlay()">播放</button>
+  </div>
+  <div id="presets">
+    <button class="preset-btn" onclick="loadPreset('hls')">HLS (.m3u8)</button>
+    <button class="preset-btn" onclick="loadPreset('flv')">HTTP-FLV (.flv)</button>
+  </div>
+  <div id="videoContainer">
+    <video id="video" playsinline webkit-playsinline x5-video-player-type="h5" x5-video-orientation="portraint"></video>
+    <div id="status">
+      <div class="spinner"></div>
+      <div>等待输入播放地址…</div>
+    </div>
+  </div>
+  <div id="infoBar">
+    <span><span class="dot off" id="statusDot"></span><span id="statusText">未连接</span></span>
+    <span id="resolution"></span>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<script src="https://cdn.jsdelivr.net/npm/flv.js@latest"></script>
+<script>
+const video = document.getElementById("video");
+const urlInput = document.getElementById("urlInput");
+const connectBtn = document.getElementById("connectBtn");
+const statusEl = document.getElementById("status");
+const statusDot = document.getElementById("statusDot");
+const statusText = document.getElementById("statusText");
+const resolution = document.getElementById("resolution");
+const toast = document.getElementById("toast");
+
+let hls = null;
+let flvPlayer = null;
+let isPlaying = false;
+
+// 从 localStorage 恢复上次地址
+const saved = localStorage.getItem("pullstream_url");
+if (saved) urlInput.value = saved;
+
+function showToast(msg) {
+  toast.textContent = msg;
+  toast.classList.add("show");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => toast.classList.remove("show"), 2000);
+}
+
+function setStatus(state, text) {
+  statusDot.className = "dot " + (state === "live" ? "live" : "off");
+  statusText.textContent = text;
+  if (state === "live") {
+    statusEl.classList.add("hidden");
+  } else if (state === "loading") {
+    statusEl.classList.remove("hidden");
+    statusEl.innerHTML = '<div class="spinner"></div><div>' + text + '</div>';
+  } else {
+    statusEl.classList.remove("hidden");
+    statusEl.innerHTML = '<div>' + text + '</div>';
+  }
+}
+
+function destroyPlayer() {
+  if (hls) { hls.destroy(); hls = null; }
+  if (flvPlayer) { flvPlayer.destroy(); flvPlayer = null; }
+  video.pause();
+  video.src = "";
+  video.classList.remove("active");
+  isPlaying = false;
+  connectBtn.textContent = "播放";
+  connectBtn.classList.remove("connected");
+}
+
+function startPlay(url) {
+  destroyPlayer();
+  localStorage.setItem("pullstream_url", url);
+  urlInput.value = url;
+  setStatus("loading", "加载中…");
+
+  const isFlv = url.endsWith(".flv");
+  const isM3u8 = url.endsWith(".m3u8") || url.includes(".m3u8");
+
+  if (isFlv && window.flvjs && flvjs.isSupported()) {
+    flvPlayer = flvjs.createPlayer({ type: "flv", url: url, isLive: true });
+    flvPlayer.attachMediaElement(video);
+    flvPlayer.load();
+    flvPlayer.play().then(() => {
+      video.classList.add("active");
+      isPlaying = true;
+      connectBtn.textContent = "停止";
+      connectBtn.classList.add("connected");
+      setStatus("live", "直播中 (FLV)");
+    }).catch(e => {
+      setStatus("error", "播放失败: " + e.message);
+      showToast("播放失败，请检查地址");
+    });
+  } else if (isM3u8 && Hls.isSupported()) {
+    hls = new Hls({ enableWorker: true, lowLatencyMode: true });
+    hls.loadSource(url);
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      video.play().then(() => {
+        video.classList.add("active");
+        isPlaying = true;
+        connectBtn.textContent = "停止";
+        connectBtn.classList.add("connected");
+        setStatus("live", "直播中 (HLS)");
+      });
+    });
+    hls.on(Hls.Events.ERROR, (event, data) => {
+      if (data.fatal) {
+        setStatus("error", "播放出错，尝试重连…");
+        showToast("连接失败，3秒后重试");
+        setTimeout(() => startPlay(url), 3000);
+      }
+    });
+  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    // iOS Safari 原生 HLS
+    video.src = url;
+    video.play().then(() => {
+      video.classList.add("active");
+      isPlaying = true;
+      connectBtn.textContent = "停止";
+      connectBtn.classList.add("connected");
+      setStatus("live", "直播中 (Native HLS)");
+    }).catch(e => {
+      setStatus("error", "播放失败: " + e.message);
+      showToast("播放失败，请检查地址");
+    });
+  } else {
+    setStatus("error", "浏览器不支持 HLS/FLV");
+    showToast("当前浏览器不支持播放该格式");
+  }
+}
+
+function togglePlay() {
+  if (isPlaying) {
+    destroyPlayer();
+    setStatus("idle", "已停止");
+  } else {
+    const url = urlInput.value.trim();
+    if (!url) { showToast("请输入播放地址"); return; }
+    startPlay(url);
+  }
+}
+
+function loadPreset(type) {
+  const base = urlInput.value.trim() || "http://192.168.3.28:8080/live/stream";
+  const bare = base.replace(/\.(m3u8|flv)$/, "");
+  urlInput.value = type === "hls" ? bare + ".m3u8" : bare + ".flv";
+  showToast("已填入 " + (type === "hls" ? "HLS" : "HTTP-FLV") + " 地址");
+}
+
+// 监听分辨率变化
+if (video.addEventListener) {
+  video.addEventListener("loadedmetadata", () => {
+    resolution.textContent = video.videoWidth + "×" + video.videoHeight;
+  });
+  video.addEventListener("resize", () => {
+    resolution.textContent = video.videoWidth + "×" + video.videoHeight;
+  });
+}
+
+// 按回车播放
+urlInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") togglePlay();
+});
+</script>
+</body>
+</html>

@@ -32,28 +32,32 @@ Status LiveSessionController::startPublish() {
     }
 
     auto publishSession = std::make_unique<ControllerState::PublishSession>();
-    const media::LiveDeviceCaptureConfig captureConfig = state_->captureSource.config();
+    const bool isDesktop = (state_->config.captureMode == "desktop");
+    const int videoWidth = isDesktop ? state_->config.capture.width : state_->captureSource.config().width;
+    const int videoHeight = isDesktop ? state_->config.capture.height : state_->captureSource.config().height;
+    const int videoFps = isDesktop ? state_->config.capture.fps : state_->captureSource.config().fps;
 
     Status status = publishSession->videoEncoder.configureH264(
-        captureConfig.width, captureConfig.height, captureConfig.fps, state_->config.videoBitrate);
+        videoWidth, videoHeight, videoFps, state_->config.videoBitrate);
     if (!status.ok()) {
         return status;
     }
 
-    status = publishSession->publisher.configureVideoStream(captureConfig.width, captureConfig.height, captureConfig.fps);
+    status = publishSession->publisher.configureVideoStream(videoWidth, videoHeight, videoFps);
     if (!status.ok()) {
         return status;
     }
 
-    publishSession->audioEnabled = state_->captureSource.hasAudio();
+    publishSession->audioEnabled = isDesktop ? false : state_->captureSource.hasAudio();
     if (publishSession->audioEnabled) {
+        const media::LiveDeviceCaptureConfig audioConfig = state_->captureSource.config();
         status = publishSession->audioEncoder.configureAac(
-            captureConfig.sampleRate, captureConfig.channels, state_->config.audioBitrate);
+            audioConfig.sampleRate, audioConfig.channels, state_->config.audioBitrate);
         if (!status.ok()) {
             return status;
         }
 
-        status = publishSession->publisher.configureAudioStream(captureConfig.sampleRate, captureConfig.channels);
+        status = publishSession->publisher.configureAudioStream(audioConfig.sampleRate, audioConfig.channels);
         if (!status.ok()) {
             return status;
         }
