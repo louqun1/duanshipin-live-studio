@@ -411,8 +411,14 @@ void LiveStudioWindow::buildUi() {
     rootLayout->addWidget(pageStack_, 1);
     setCentralWidget(central);
 
+    connect(captureModeCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        updateButtonStates();
+    });
+
     connect(startButton_, &QPushButton::clicked, this, [this]() {
-        if (operationWatcher_.isRunning() || !deviceProbeReady_ || businessClient_ == nullptr) {
+        if (operationWatcher_.isRunning() ||
+            (captureModeCombo_->currentData().toString() != QStringLiteral("desktop") && !deviceProbeReady_) ||
+            businessClient_ == nullptr) {
             return;
         }
 
@@ -710,25 +716,30 @@ QGroupBox* LiveStudioWindow::buildPublishConfigGroup(QWidget* parent) {
     fpsCombo_->setMaximumWidth(100);
     sampleRateCombo_ = new QComboBox(group);
     sampleRateCombo_->setMaximumWidth(180);
+    fpsCombo_->addItem(QStringLiteral("30 帧/秒"), 30);
 
     startButton_ = new QPushButton(QStringLiteral("开始推流"), group);
     startButton_->setObjectName("primaryButton");
     startButton_->setMinimumWidth(132);
 
-    layout->addWidget(new QLabel(QStringLiteral("RTMP 地址"), group), 0, 0);
-    layout->addWidget(rtmpUrlEdit_, 0, 1);
-    layout->addWidget(startButton_, 0, 2);
+    layout->addWidget(new QLabel(QStringLiteral("采集源"), group), 0, 0);
+    layout->addWidget(captureModeCombo_, 0, 1);
+    layout->addWidget(new QLabel(QStringLiteral("桌面模式仅采集画面，不包含系统声音或麦克风。"), group), 0, 2, 1, 8);
 
-    layout->addWidget(new QLabel(QStringLiteral("视频设备"), group), 1, 0);
-    layout->addWidget(videoDeviceCombo_, 1, 1);
-    layout->addWidget(new QLabel(QStringLiteral("音频设备"), group), 1, 2);
-    layout->addWidget(audioDeviceCombo_, 1, 3);
-    layout->addWidget(new QLabel(QStringLiteral("分辨率"), group), 1, 4);
-    layout->addWidget(resolutionCombo_, 1, 5);
-    layout->addWidget(new QLabel(QStringLiteral("帧率"), group), 1, 6);
-    layout->addWidget(fpsCombo_, 1, 7);
-    layout->addWidget(new QLabel(QStringLiteral("采样率"), group), 1, 8);
-    layout->addWidget(sampleRateCombo_, 1, 9);
+    layout->addWidget(new QLabel(QStringLiteral("RTMP 地址"), group), 1, 0);
+    layout->addWidget(rtmpUrlEdit_, 1, 1);
+    layout->addWidget(startButton_, 1, 2);
+
+    layout->addWidget(new QLabel(QStringLiteral("视频设备"), group), 2, 0);
+    layout->addWidget(videoDeviceCombo_, 2, 1);
+    layout->addWidget(new QLabel(QStringLiteral("音频设备"), group), 2, 2);
+    layout->addWidget(audioDeviceCombo_, 2, 3);
+    layout->addWidget(new QLabel(QStringLiteral("分辨率"), group), 2, 4);
+    layout->addWidget(resolutionCombo_, 2, 5);
+    layout->addWidget(new QLabel(QStringLiteral("帧率"), group), 2, 6);
+    layout->addWidget(fpsCombo_, 2, 7);
+    layout->addWidget(new QLabel(QStringLiteral("采样率"), group), 2, 8);
+    layout->addWidget(sampleRateCombo_, 2, 9);
 
     return group;
 }
@@ -1212,6 +1223,9 @@ void LiveStudioWindow::updateButtonStates() {
     const live_studio::session::SessionDiagnostics diagnostics = controller_.diagnostics();
     const bool publishing = isPublishingSessionActive(diagnostics);
     const bool localCaptureEnabled = shouldUseLocalCapturePipeline();
+    const bool desktopCapture = captureModeCombo_ != nullptr &&
+        captureModeCombo_->currentData().toString() == QStringLiteral("desktop");
+    const bool captureReady = desktopCapture || deviceProbeReady_;
     const bool hasRtmpUrl = rtmpUrlEdit_ != nullptr && !rtmpUrlEdit_->text().trimmed().isEmpty();
     const bool hasBusinessConfig =
         apiBaseUrlEdit_ != nullptr && usernameEdit_ != nullptr && passwordEdit_ != nullptr &&
@@ -1237,24 +1251,27 @@ void LiveStudioWindow::updateButtonStates() {
     if (rtmpUrlEdit_ != nullptr) {
         rtmpUrlEdit_->setEnabled(!busy && !publishing);
     }
+    if (captureModeCombo_ != nullptr) {
+        captureModeCombo_->setEnabled(!busy && !publishing);
+    }
     if (videoDeviceCombo_ != nullptr) {
-        videoDeviceCombo_->setEnabled(!busy && !publishing && deviceProbeReady_);
+        videoDeviceCombo_->setEnabled(!busy && !publishing && deviceProbeReady_ && !desktopCapture);
     }
     if (audioDeviceCombo_ != nullptr) {
-        audioDeviceCombo_->setEnabled(!busy && !publishing && deviceProbeReady_);
+        audioDeviceCombo_->setEnabled(!busy && !publishing && deviceProbeReady_ && !desktopCapture);
     }
     if (resolutionCombo_ != nullptr) {
-        resolutionCombo_->setEnabled(!busy && !publishing && deviceProbeReady_);
+        resolutionCombo_->setEnabled(!busy && !publishing && deviceProbeReady_ && !desktopCapture);
     }
     if (fpsCombo_ != nullptr) {
-        fpsCombo_->setEnabled(!busy && !publishing && deviceProbeReady_);
+        fpsCombo_->setEnabled(!busy && !publishing && captureReady);
     }
     if (sampleRateCombo_ != nullptr) {
-        sampleRateCombo_->setEnabled(!busy && !publishing && deviceProbeReady_);
+        sampleRateCombo_->setEnabled(!busy && !publishing && deviceProbeReady_ && !desktopCapture);
     }
     if (startButton_ != nullptr) {
         startButton_->setEnabled(
-            deviceProbeReady_ && !busy && !publishing && hasBusinessConfig && (!localCaptureEnabled || hasRtmpUrl));
+            captureReady && !busy && !publishing && hasBusinessConfig && (!localCaptureEnabled || hasRtmpUrl));
     }
     if (stopButton_ != nullptr) {
         stopButton_->setEnabled(!operationBusy && publishing);
@@ -1537,6 +1554,10 @@ void LiveStudioWindow::switchToLiveRoomPage() {
 }
 
 bool LiveStudioWindow::shouldUseLocalCapturePipeline() const {
+    if (captureModeCombo_ != nullptr &&
+        captureModeCombo_->currentData().toString() == QStringLiteral("desktop")) {
+        return true;
+    }
     return videoDeviceCombo_ != nullptr && !videoDeviceCombo_->currentData().toString().trimmed().isEmpty();
 }
 
@@ -1728,31 +1749,6 @@ void LiveStudioWindow::updateStatusSummary(const live_studio::session::SessionDi
             .arg(firstPacketText)
             .arg(errorText));
     statusSummaryLabel_->setToolTip(QString::fromStdString(diagnostics.lastError));
-}
-
-void LiveStudioWindow::applyCaptureModeVisibility() {
-    if (captureModeCombo_ == nullptr) {
-        return;
-    }
-
-    const QString currentMode = captureModeCombo_->currentData().toString();
-    const bool isDesktop = (currentMode == QStringLiteral("desktop"));
-
-    const bool deviceControlsVisible = !isDesktop;
-
-    if (videoDeviceCombo_ != nullptr) {
-        videoDeviceCombo_->setVisible(deviceControlsVisible);
-    }
-    if (audioDeviceCombo_ != nullptr) {
-        audioDeviceCombo_->setVisible(deviceControlsVisible);
-    }
-    if (sampleRateCombo_ != nullptr) {
-        sampleRateCombo_->setVisible(deviceControlsVisible);
-    }
-
-    if (resolutionCombo_ != nullptr) {
-        resolutionCombo_->setVisible(deviceControlsVisible);
-    }
 }
 
 void LiveStudioWindow::populateCaptureControls(const live_studio::capture::LiveDeviceProbeResult& probe) {
@@ -2075,10 +2071,10 @@ live_studio::session::LiveSessionConfig LiveStudioWindow::buildSessionConfig() c
     config.capture.height = isDesktopCapture ? 1080 : resolution.height();
     config.capture.fps = fps > 0 ? fps : 30;
     config.capture.sampleRate = sampleRate > 0 ? sampleRate : 48000;
-    config.capture.channels = audioDeviceId.empty() ? 0 : 2;
+    config.capture.channels = (isDesktopCapture || audioDeviceId.empty()) ? 0 : 2;
     config.capture.frameCount = isDesktopCapture ? 0 : 1;
     config.videoBitrate = chooseVideoBitrate(config.capture.width, config.capture.height, config.capture.fps);
-    config.audioBitrate = audioDeviceId.empty() ? 0 : 128000;
+    config.audioBitrate = (isDesktopCapture || audioDeviceId.empty()) ? 0 : 128000;
     return config;
 }
 
