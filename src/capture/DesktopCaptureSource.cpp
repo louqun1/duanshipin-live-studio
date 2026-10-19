@@ -42,7 +42,10 @@ struct DesktopCaptureContext {
 
     std::mutex mutex;
     std::condition_variable condition;
+    // Keep only the freshest frames when encoding or preview falls behind.
+    static constexpr std::size_t kMaxPendingEvents = 3;
     std::queue<CaptureEvent> events;
+    std::atomic_int droppedEvents{0};
 
     std::atomic_int frameIndex{0};
     std::int64_t epochWallClockNs = 0;
@@ -186,6 +189,7 @@ void desktopCaptureThreadMain(const media::DesktopCaptureConfig& config, Desktop
     }
 
     int readFrameIter = 0;
+    int consecutiveReadErrors = 0;
     while (!ctx->stopRequested.load()) {
         spdlog::info("[DesktopCapture] loop iter={} stop={}", readFrameIter, ctx->stopRequested.load());
         ret = av_read_frame(formatCtx, packet);
@@ -197,9 +201,14 @@ void desktopCaptureThreadMain(const media::DesktopCaptureConfig& config, Desktop
             }
             spdlog::warn("[DesktopCapture] av_read_frame err at iter={}: {} {}",
                          readFrameIter, ret, ffmpegErrorString(ret));
+            if (++consecutiveReadErrors >= 10) {
+                spdlog::error("[DesktopCapture] stopping after repeated read failures");
+                break;
+            }
             continue;
         }
 
+        consecutiveReadErrors = 0;
         if (packet->stream_index != videoStreamIndex) {
             av_packet_unref(packet);
             continue;
@@ -216,11 +225,22 @@ void desktopCaptureThreadMain(const media::DesktopCaptureConfig& config, Desktop
                 pixelOffset = headerOffset;
             }
         }
+        const int bgraSize = av_image_get_buffer_size(sourceFormat, sourceWidth, sourceHeight, 1);
+        if (bgraSize < 0 || pixelOffset > static_cast<uint32_t>(packet->size) ||
+            packet->size - static_cast<int>(pixelOffset) < bgraSize) {
+            spdlog::warn("[DesktopCapture] short or invalid BMP frame: packet={} offset={} expected={}",
+                         packet->size, pixelOffset, bgraSize);
+            av_packet_unref(packet);
+            continue;
+        }
         const uint8_t* pixelData = packet->data + pixelOffset;
 
-        av_image_fill_arrays(srcFrame->data, srcFrame->linesize,
-                             pixelData, sourceFormat,
-                             sourceWidth, sourceHeight, 1);
+        if (av_image_fill_arrays(srcFrame->data, srcFrame->linesize,
+                                 pixelData, sourceFormat,
+                                 sourceWidth, sourceHeight, 1) < 0) {
+            av_packet_unref(packet);
+            continue;
+        }
         srcFrame->width = sourceWidth;
         srcFrame->height = sourceHeight;
         srcFrame->format = sourceFormat;
@@ -268,6 +288,13 @@ void desktopCaptureThreadMain(const media::DesktopCaptureConfig& config, Desktop
 
         {
             std::lock_guard<std::mutex> lock(ctx->mutex);
+            if (ctx->events.size() >= DesktopCaptureContext::kMaxPendingEvents) {
+                ctx->events.pop();
+                const int dropped = ctx->droppedEvents.fetch_add(1) + 1;
+                if (dropped == 1 || dropped % 30 == 0) {
+                    spdlog::warn("[DesktopCapture] dropped {} stale capture frames", dropped);
+                }
+            }
             ctx->events.push(std::move(event));
             ctx->condition.notify_one();
         }

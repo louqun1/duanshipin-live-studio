@@ -93,7 +93,6 @@ private:
     void updatePreview();
     void updateStatusSummary(const live_studio::session::SessionDiagnostics& diagnostics);
     void refreshBusinessStatus();
-    void applyCaptureModeVisibility();
     void populateCaptureControls(const live_studio::capture::LiveDeviceProbeResult& probe);
     void setPanelState(PanelState state);
     void switchToSetupPage();
